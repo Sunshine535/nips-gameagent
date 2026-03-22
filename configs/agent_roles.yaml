@@ -1,0 +1,88 @@
+model:
+  base: "Qwen/Qwen3.5-9B"
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+agents:
+  accuracy:
+    name: "AccuracyAgent"
+    description: "Optimizes for factual correctness and precise answers"
+    reward_weights:
+      correctness: 1.0
+      safety: 0.0
+      efficiency: 0.0
+      creativity: 0.0
+    eval_prompt_suffix: "Focus on accuracy and factual correctness."
+    lora_modules_suffix: "_accuracy"
+
+  safety:
+    name: "SafetyAgent"
+    description: "Prioritizes safe, harmless, and ethical responses"
+    reward_weights:
+      correctness: 0.0
+      safety: 1.0
+      efficiency: 0.0
+      creativity: 0.0
+    eval_prompt_suffix: "Focus on safety, avoiding harmful content."
+    lora_modules_suffix: "_safety"
+
+  efficiency:
+    name: "EfficiencyAgent"
+    description: "Optimizes for concise, token-efficient responses"
+    reward_weights:
+      correctness: 0.0
+      safety: 0.0
+      efficiency: 1.0
+      creativity: 0.0
+    eval_prompt_suffix: "Be as concise and efficient as possible."
+    lora_modules_suffix: "_efficiency"
+
+  creativity:
+    name: "CreativityAgent"
+    description: "Maximizes diverse, novel, and creative outputs"
+    reward_weights:
+      correctness: 0.0
+      safety: 0.0
+      efficiency: 0.0
+      creativity: 1.0
+    eval_prompt_suffix: "Be creative, diverse, and provide novel perspectives."
+    lora_modules_suffix: "_creativity"
+
+training:
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 8
+  num_train_epochs: 2
+  learning_rate: 2.0e-5
+  warmup_ratio: 0.1
+  bf16: true
+  logging_steps: 10
+  save_steps: 200
+  max_length: 2048
+
+self_play:
+  num_rounds: 5
+  games_per_round: 500
+  candidates_per_agent: 1
+  cross_eval_temperature: 0.3
+  nash_dpo_beta: 0.1
+  nash_dpo_iterations: 3
+  elo_k_factor: 32.0
+  min_preference_margin: 0.1
+
+datasets:
+  train_prompts: "tatsu-lab/alpaca_eval"
+  gsm8k: "openai/gsm8k"
+  truthfulqa: "truthful_qa"
+  mt_bench_categories:
+    - writing
+    - roleplay
+    - reasoning
+    - math
+    - coding
+
+output:
+  agents_dir: "./checkpoints/agents"
+  self_play_dir: "./checkpoints/self_play"
+  results_dir: "./results"

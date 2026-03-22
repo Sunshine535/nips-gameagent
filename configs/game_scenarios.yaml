@@ -1,0 +1,168 @@
+model:
+  base_model: "Qwen/Qwen3.5-9B"
+  hf_endpoint: "https://hf-mirror.com"
+  lora:
+    r: 64
+    lora_alpha: 128
+    lora_dropout: 0.05
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+scenarios:
+  prisoners_dilemma:
+    name: "Prisoner's Dilemma"
+    type: "symmetric_2player"
+    actions: ["cooperate", "defect"]
+    payoff_matrix:
+      cooperate_cooperate: [3, 3]
+      cooperate_defect: [0, 5]
+      defect_cooperate: [5, 0]
+      defect_defect: [1, 1]
+    num_rounds: 10
+    description: "Two prisoners must independently decide to cooperate or defect."
+
+  coordination_game:
+    name: "Coordination Game"
+    type: "symmetric_2player"
+    actions: ["A", "B"]
+    payoff_matrix:
+      A_A: [4, 4]
+      A_B: [0, 0]
+      B_A: [0, 0]
+      B_B: [3, 3]
+    num_rounds: 10
+    description: "Two players benefit from choosing the same action."
+
+  battle_of_sexes:
+    name: "Battle of the Sexes"
+    type: "asymmetric_2player"
+    actions: ["opera", "football"]
+    payoff_matrix:
+      opera_opera: [3, 2]
+      opera_football: [0, 0]
+      football_opera: [0, 0]
+      football_football: [2, 3]
+    num_rounds: 10
+    description: "Players prefer different options but want to coordinate."
+
+  stag_hunt:
+    name: "Stag Hunt"
+    type: "symmetric_2player"
+    actions: ["stag", "hare"]
+    payoff_matrix:
+      stag_stag: [5, 5]
+      stag_hare: [0, 3]
+      hare_stag: [3, 0]
+      hare_hare: [2, 2]
+    num_rounds: 10
+    description: "Cooperation yields highest payoff but requires trust."
+
+  chicken:
+    name: "Chicken (Hawk-Dove)"
+    type: "asymmetric_2player"
+    actions: ["swerve", "straight"]
+    payoff_matrix:
+      swerve_swerve: [3, 3]
+      swerve_straight: [1, 5]
+      straight_swerve: [5, 1]
+      straight_straight: [0, 0]
+    num_rounds: 10
+    description: "Players choose swerve or straight; mutual straight is catastrophic."
+
+  matching_pennies:
+    name: "Matching Pennies"
+    type: "asymmetric_2player"
+    actions: ["heads", "tails"]
+    payoff_matrix:
+      heads_heads: [1, -1]
+      heads_tails: [-1, 1]
+      tails_heads: [-1, 1]
+      tails_tails: [1, -1]
+    num_rounds: 10
+    description: "Zero-sum: one player wins by matching, the other by mismatching."
+
+  public_goods:
+    name: "Public Goods Game"
+    type: "n_player"
+    actions: ["contribute", "free_ride"]
+    multiplier: 2.0
+    endowment: 10
+    num_players: 4
+    num_rounds: 10
+    description: "Players decide how much to contribute to a public pool."
+
+  ultimatum:
+    name: "Ultimatum Game"
+    type: "sequential_2player"
+    roles: ["proposer", "responder"]
+    total_amount: 100
+    min_offer: 0
+    max_offer: 100
+    num_rounds: 10
+    description: "Proposer offers a split; responder accepts or rejects."
+
+  auction:
+    name: "Sealed-Bid Auction"
+    type: "n_player"
+    auction_type: "first_price"
+    num_players: 4
+    item_value_range: [50, 150]
+    num_rounds: 10
+    description: "Players bid for an item; highest bidder pays their bid."
+
+  negotiation:
+    name: "Multi-Issue Negotiation"
+    type: "sequential_2player"
+    issues: ["price", "delivery", "warranty"]
+    max_rounds: 5
+    timeout_payoff: [0, 0]
+    description: "Two parties negotiate over multiple issues."
+
+grpo:
+  num_generations: 8
+  temperature: 0.7
+  kl_coeff: 0.05
+  clip_range: 0.2
+  gamma: 0.99
+  entropy_coeff: 0.01
+
+training:
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 4
+  num_train_epochs: 10
+  learning_rate: 1.0e-4
+  warmup_ratio: 0.05
+  lr_scheduler_type: "cosine"
+  bf16: true
+  logging_steps: 20
+  save_steps: 500
+  max_seq_length: 2048
+  gradient_checkpointing: true
+
+evaluation:
+  benchmarks:
+    - name: "arc_challenge"
+      dataset_id: "allenai/ai2_arc"
+      subset: "ARC-Challenge"
+      split: "test"
+      max_samples: 1172
+    - name: "strategyqa"
+      dataset_id: "wics/strategy-qa"
+      split: "test"
+      max_samples: 2290
+    - name: "bbh"
+      dataset_id: "lukaemon/bbh"
+      split: "test"
+      max_samples: 1000
+    - name: "gsm8k"
+      dataset_id: "openai/gsm8k"
+      subset: "main"
+      split: "test"
+      max_samples: 1319
+    - name: "truthfulqa"
+      dataset_id: "truthful_qa"
+      subset: "generation"
+      split: "validation"
+      max_samples: 817
+  game_eval_rounds: 50
+
+output_dir: "./outputs"
