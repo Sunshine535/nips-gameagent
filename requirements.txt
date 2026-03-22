@@ -1,9 +1,10 @@
-# Auto-generated: PyTorch installed separately via setup.sh
-# Use: uv pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+# Merged requirements: nips-gameagent + nips-gamerefine
+# Use: pip install -r requirements.txt
 
-transformers>=4.46.0
-datasets>=2.21.0
-accelerate>=0.34.0
+torch>=2.10.0
+transformers>=5.3.0
+accelerate>=1.13.0
+datasets>=3.0.0
 numpy>=1.26.0
 scipy>=1.14.0
 matplotlib>=3.9.0
@@ -11,7 +12,8 @@ tqdm>=4.66.0
 pandas>=2.2.0
 pyyaml>=6.0.1
 huggingface_hub>=0.25.0
+evaluate>=0.4.0
 
 # Training frameworks
-trl>=0.12.0
-peft>=0.13.0
+trl>=0.15.0
+peft>=0.15.0

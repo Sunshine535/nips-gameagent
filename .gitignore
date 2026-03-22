@@ -1,12 +1,37 @@
-
-# Large experiment artifacts (use collect_results.sh to archive)
-results_archive/*.tar.gz
-checkpoints/**/*.pt
-checkpoints/**/*.bin
-checkpoints/**/*.safetensors
-outputs/**/*.pt
-*.ckpt
+# Python
 __pycache__/
-.venv/
+*.py[cod]
+*$py.class
 *.egg-info/
-wandb/
+dist/
+build/
+*.egg
+
+# Training artifacts (large files)
+checkpoints/
+logs/
+results/
+data/
+outputs/
+*.pt
+*.bin
+*.safetensors
+*.ckpt
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Env
+.env
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Results archive
+results_archive/
