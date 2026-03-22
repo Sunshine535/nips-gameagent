@@ -170,7 +170,6 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
         save_steps=9999,
         report_to="none",
         max_length=2048,
-        max_prompt_length=1024,
     )
 
     trainer = DPOTrainer(
