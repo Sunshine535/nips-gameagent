@@ -28,8 +28,6 @@ source .venv/bin/activate
 # 4. Run all experiments
 bash scripts/run_all_experiments.sh
 
-# Smoke test (quick verification)
-bash scripts/run_all_experiments.sh --quick
 
 # Run only GRPO track
 bash scripts/run_all_experiments.sh --skip_nash
