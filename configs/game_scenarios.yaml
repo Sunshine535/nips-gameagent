@@ -17,7 +17,7 @@ scenarios:
       cooperate_defect: [0, 5]
       defect_cooperate: [5, 0]
       defect_defect: [1, 1]
-    num_rounds: 10
+    num_rounds: 3
     description: "Two prisoners must independently decide to cooperate or defect."
 
   coordination_game:
@@ -29,7 +29,7 @@ scenarios:
       A_B: [0, 0]
       B_A: [0, 0]
       B_B: [3, 3]
-    num_rounds: 10
+    num_rounds: 3
     description: "Two players benefit from choosing the same action."
 
   battle_of_sexes:
@@ -41,7 +41,7 @@ scenarios:
       opera_football: [0, 0]
       football_opera: [0, 0]
       football_football: [2, 3]
-    num_rounds: 10
+    num_rounds: 3
     description: "Players prefer different options but want to coordinate."
 
   stag_hunt:
@@ -53,7 +53,7 @@ scenarios:
       stag_hare: [0, 3]
       hare_stag: [3, 0]
       hare_hare: [2, 2]
-    num_rounds: 10
+    num_rounds: 3
     description: "Cooperation yields highest payoff but requires trust."
 
   chicken:
@@ -65,7 +65,7 @@ scenarios:
       swerve_straight: [1, 5]
       straight_swerve: [5, 1]
       straight_straight: [0, 0]
-    num_rounds: 10
+    num_rounds: 3
     description: "Players choose swerve or straight; mutual straight is catastrophic."
 
   matching_pennies:
@@ -77,7 +77,7 @@ scenarios:
       heads_tails: [-1, 1]
       tails_heads: [-1, 1]
       tails_tails: [1, -1]
-    num_rounds: 10
+    num_rounds: 3
     description: "Zero-sum: one player wins by matching, the other by mismatching."
 
   public_goods:
@@ -87,7 +87,7 @@ scenarios:
     multiplier: 2.0
     endowment: 10
     num_players: 4
-    num_rounds: 10
+    num_rounds: 3
     description: "Players decide how much to contribute to a public pool."
 
   ultimatum:
@@ -97,7 +97,7 @@ scenarios:
     total_amount: 100
     min_offer: 0
     max_offer: 100
-    num_rounds: 10
+    num_rounds: 3
     description: "Proposer offers a split; responder accepts or rejects."
 
   auction:
@@ -106,14 +106,14 @@ scenarios:
     auction_type: "first_price"
     num_players: 4
     item_value_range: [50, 150]
-    num_rounds: 10
+    num_rounds: 3
     description: "Players bid for an item; highest bidder pays their bid."
 
   negotiation:
     name: "Multi-Issue Negotiation"
     type: "sequential_2player"
     issues: ["price", "delivery", "warranty"]
-    max_rounds: 5
+    max_rounds: 3
     timeout_payoff: [0, 0]
     description: "Two parties negotiate over multiple issues."
 

@@ -89,7 +89,7 @@ def play_episode_for_data(model, tokenizer, env, player_ids, device, temperature
             ).to(device)
             with torch.no_grad():
                 outputs = model.generate(
-                    **inputs, max_new_tokens=200, do_sample=True,
+                    **inputs, max_new_tokens=80, do_sample=True,
                     temperature=temperature, top_p=0.9,
                 )
             response = tokenizer.decode(
@@ -175,6 +175,8 @@ def main():
         trust_remote_code=True, device_map="auto",
     )
     model.eval()
+    if model.generation_config.pad_token_id is None:
+        model.generation_config.pad_token_id = tokenizer.pad_token_id
 
     scenario_names = list(config["scenarios"].keys())
     global_stats = {}
