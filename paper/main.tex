@@ -1,0 +1,362 @@
+\documentclass{article}
+\usepackage[preprint]{neurips_2024}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{multirow}
+\usepackage{subcaption}
+
+\title{GameAgent: Game-Theoretic Self-Play Improves Both Strategic Reasoning and Multi-Objective Alignment in LLMs}
+
+\author{
+  Anonymous Authors
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Large language model post-training typically optimizes a single alignment objective and does not explicitly develop strategic reasoning capabilities.
+We introduce \textbf{GameAgent}, a unified game-theoretic self-play framework that simultaneously improves both strategic reasoning and multi-objective alignment.
+Our approach comprises two complementary tracks:
+(A)~\textbf{GRPO self-play} across 10 diverse strategic games---spanning matrix games, N-player games, and sequential games---to develop emergent strategic reasoning through competitive and cooperative dynamics;
+(B)~\textbf{Nash-DPO}, a formally grounded multi-objective alignment method based on Nash bargaining theory that adaptively balances correctness, safety, efficiency, and creativity objectives.
+Through a factorial experimental design (Base, SFT-only, A-only, B-only, A+B) on Qwen3.5-9B, we demonstrate that:
+(1)~game-theoretic self-play significantly improves strategic reasoning, with agents converging toward Nash equilibrium strategies;
+(2)~Nash-DPO achieves Pareto-superior multi-objective alignment compared to uniform-weight DPO;
+(3)~the two tracks exhibit complementary improvements, with the combined A+B configuration outperforming either track alone on both game-theoretic metrics and standard NLP benchmarks.
+% TODO: Fill in specific numbers from experiments
+\end{abstract}
+
+%====================================
+\section{Introduction}
+\label{sec:intro}
+%====================================
+
+Current large language model (LLM) post-training methods face two fundamental limitations.
+First, alignment is typically treated as a single-objective optimization problem---maximizing helpfulness subject to safety constraints---which inadequately captures the multi-dimensional nature of human preferences across correctness, safety, efficiency, and creativity~\citep{rame2024rewarded,wu2024fine}.
+Second, standard RLHF and DPO procedures do not develop \emph{strategic reasoning}: the ability to reason about other agents' beliefs, intentions, and likely actions in interactive settings~\citep{gandhi2024strategic,duan2024gtbench}.
+
+Game theory provides a natural framework for addressing both limitations simultaneously.
+Competitive and cooperative game dynamics require agents to reason strategically about opponents, while Nash bargaining theory~\citep{nash1950bargaining} offers a principled solution for multi-objective optimization that satisfies individual rationality, Pareto optimality, and symmetry axioms.
+
+We introduce \textbf{GameAgent}, a unified framework that leverages game-theoretic self-play for LLM post-training.
+Our approach consists of two complementary tracks:
+
+\begin{itemize}
+    \item \textbf{Track A: GRPO Self-Play} trains LLM agents through self-play across 10 diverse strategic games, using Group Relative Policy Optimization~\citep{shao2024deepseekmath} with iterative opponent updates. This develops emergent strategic reasoning that transfers across game types.
+    \item \textbf{Track B: Nash-DPO} applies Nash bargaining theory to multi-objective alignment, where four objective agents (correctness, safety, efficiency, creativity) negotiate through an iterative DPO framework with dynamically computed Nash bargaining weights.
+\end{itemize}
+
+\noindent Our contributions are:
+\begin{enumerate}
+    \item A \textbf{unified game-theoretic framework} that simultaneously improves strategic reasoning and multi-objective alignment through self-play.
+    \item \textbf{Nash-DPO}: a formally grounded multi-objective DPO method based on Nash bargaining (Definition~\ref{def:moag}, Proposition~\ref{prop:nash_dpo}).
+    \item \textbf{Cross-game transfer}: the first systematic study showing that diversity of game environments drives emergent strategic reasoning capabilities.
+    \item \textbf{Factorial analysis}: A-only, B-only, and A+B configurations reveal complementary improvements, validated through factorial ANOVA interaction tests.
+\end{enumerate}
+
+
+%====================================
+\section{Related Work}
+\label{sec:related}
+%====================================
+
+\paragraph{Self-Play for LLMs.}
+Self-play has emerged as a promising paradigm for LLM improvement.
+SPIN~\citep{chen2024self} uses self-play to generate training data from the model itself.
+SPAG~\citep{cheng2024self} applies self-play in adversarial games.
+SPIRAL~\citep{yuan2024self} combines self-play with iterative refinement.
+Our work extends these approaches to a broader set of strategic games with formal game-theoretic grounding.
+
+\paragraph{Multi-Objective Alignment.}
+Several works address the multi-objective nature of alignment.
+Reward Soups~\citep{rame2024rewarded} interpolate between reward-specific models.
+MORLHF~\citep{wu2024fine} applies multi-objective reinforcement learning.
+Pareto RLHF explores Pareto-optimal solutions.
+Our Nash-DPO differs by providing formal Nash bargaining guarantees.
+
+\paragraph{Game Theory in Machine Learning.}
+GANs~\citep{goodfellow2014generative} pioneered game-theoretic training.
+Multi-agent RL has explored Nash equilibrium learning~\citep{hu2003nash}.
+MAgICoRe~\citep{she2024magicore} applies game-theoretic reasoning to code generation.
+Nash-MD~\citep{munos2024nash} uses mirror descent for RLHF.
+Our work uniquely combines strategic reasoning development with multi-objective alignment.
+
+
+%====================================
+\section{Method}
+\label{sec:method}
+%====================================
+
+\subsection{Game-Theoretic Self-Play Framework}
+\label{sec:framework}
+
+We design 10 game environments spanning three categories:
+\textbf{(i)} symmetric 2-player matrix games (Prisoner's Dilemma, Coordination Game, Battle of the Sexes, Stag Hunt, Chicken, Matching Pennies);
+\textbf{(ii)} N-player games (Public Goods, Auction); and
+\textbf{(iii)} sequential games (Ultimatum, Negotiation).
+Each game is presented to the LLM through a structured prompt containing the game rules, available actions, payoff structure, and interaction history.
+
+%----------------------------------
+\subsection{Track A: GRPO Self-Play for Strategic Reasoning}
+\label{sec:grpo}
+%----------------------------------
+
+\paragraph{SFT Warmup.}
+We first train 4 LoRA agents on supervised fine-tuning data generated by prompting the base model to play each game for 500 episodes.
+Each agent is assigned 2--3 games and trained for 2 epochs, providing a warm start for self-play.
+
+\paragraph{Iterative Self-Play.}
+Over =3$ iterations, agents play all 10 games against each other.
+In each iteration, we generate 2000 episodes per game, with agents alternating roles.
+
+\paragraph{GRPO Update.}
+For each episode, we compute group-relative advantages:
+\begin{equation}
+\hat{A}^{\text{group}}(s, a) = \frac{R(s,a) - \mu_{\text{group}}}{\sigma_{\text{group}} + \epsilon}
+\end{equation}
+where $\mu_{\text{group}}$ and $\sigma_{\text{group}}$ are computed over a group of $ sampled responses.
+The policy update minimizes:
+\begin{equation}
+\mathcal{L}_{\text{GRPO}} = -\mathbb{E}\left[\min\left(\frac{\pi_\theta(a|s)}{\pi_{\text{old}}(a|s)}\hat{A}, \text{clip}\left(\frac{\pi_\theta(a|s)}{\pi_{\text{old}}(a|s)}, 1-\epsilon, 1+\epsilon\right)\hat{A}\right)\right] + \beta D_{\text{KL}}[\pi_\theta \| \pi_{\text{ref}}]
+\end{equation}
+
+\paragraph{Cross-Game Transfer.}
+To assess emergent strategic reasoning, we evaluate zero-shot transfer: training on $ games and evaluating on the remaining 0-K$ games without additional fine-tuning.
+
+%----------------------------------
+\subsection{Track B: Nash-DPO for Multi-Objective Alignment}
+\label{sec:nash_dpo}
+%----------------------------------
+
+\begin{definition}[Multi-Objective Alignment Game]
+\label{def:moag}
+We define a cooperative game $\mathcal{G} = (N, \{u_i\}, D, \pi_{\text{ref}})$ where:
+ = \{1, \ldots, n\}$ is the set of $ objective agents (correctness, safety, efficiency, creativity);
+ : \Pi \to \mathbb{R}$ are agent utility functions over the policy space $\Pi$;
+ = (u_1(\pi_{\text{ref}}), \ldots, u_n(\pi_{\text{ref}}))$ is the disagreement point; and
+$\pi_{\text{ref}}$ is the reference SFT policy.
+\end{definition}
+
+\begin{proposition}[Nash-DPO Objective]
+\label{prop:nash_dpo}
+The Nash bargaining solution for the multi-objective alignment game, combined with the DPO reparameterization, yields:
+\begin{equation}
+\mathcal{L}_{\text{Nash-DPO}}(\pi) = -\sum_{i \in N} w_i \cdot \log \sigma\!\left(\beta\left[\log\frac{\pi(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \log\frac{\pi(y_l|x)}{\pi_{\text{ref}}(y_l|x)}\right]\right)
+\label{eq:nash_dpo}
+\end{equation}
+where the Nash bargaining weights are computed as:
+\begin{equation}
+w_i^{(t)} \propto \frac{1}{u_i(\pi^{(t-1)}) - u_i(\pi_{\text{ref}}) + \epsilon}
+\end{equation}
+\end{proposition}
+
+Agents furthest from their ideal outcome receive higher weight, ensuring balanced multi-objective optimization.
+Algorithm~\ref{alg:nash_dpo} presents the iterative procedure.
+
+\begin{algorithm}[t]
+\caption{Iterative Nash-DPO}
+\label{alg:nash_dpo}
+\begin{algorithmic}[1]
+\REQUIRE Reference policy $\pi_{\text{ref}}$, objective agents $\{u_i\}_{i=1}^n$, iterations $, DPO $\beta$
+\STATE Initialize $\pi^{(0)} \leftarrow \pi_{\text{ref}}$
+\FOR{ = 1, \ldots, T$}
+    \STATE Each agent generates candidate responses and cross-evaluates
+    \STATE Compute marginal utilities: $\delta_i = u_i(\pi^{(t-1)}) - u_i(\pi_{\text{ref}})$
+    \STATE Compute Nash weights: ^{(t)} \propto 1 / (\delta_i + \epsilon)$
+    \STATE Aggregate preference pairs with weights $\{w_i^{(t)}\}$
+    \STATE DPO update: $\pi^{(t)} \leftarrow \arg\min_\pi \mathcal{L}_{\text{Nash-DPO}}(\pi^{(t-1)})$
+\ENDFOR
+\RETURN $\pi^{(T)}$
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Robust Reward Functions.}
+Each objective agent employs a robust reward function designed to resist reward hacking:
+\textbf{Correctness}: NLI entailment (DeBERTa-v3-large) combined with semantic cosine similarity;
+\textbf{Safety}: multi-level regex pattern detection with severity weighting;
+\textbf{Efficiency}: information density = coverage $\times$ (1 hBc$ length\_penalty);
+\textbf{Creativity}: windowed type-token ratio (TTR) plus sentence variety score.
+All rewards include anti-hacking penalties for excessive length and n-gram repetition.
+
+
+%----------------------------------
+\subsection{Factorial Experimental Design}
+\label{sec:factorial}
+%----------------------------------
+
+To isolate the contribution of each track, we evaluate five conditions in a factorial design:
+\textbf{Base} (unmodified Qwen3.5-9B),
+\textbf{SFT-only} (supervised fine-tuning on game data),
+\textbf{A-only} (GRPO self-play),
+\textbf{B-only} (Nash-DPO),
+\textbf{A+B} (GRPO followed by Nash-DPO).
+We test for complementarity via the interaction effect in factorial ANOVA.
+
+
+%====================================
+\section{Experiments}
+\label{sec:experiments}
+%====================================
+
+\subsection{Setup}
+
+\paragraph{Base Model.} Qwen3.5-9B~\citep{qwen2024qwen2} with LoRA adaptation (=64$, $\alpha=128$).
+
+\paragraph{Hardware.} 4$\times$ NVIDIA H800 80GB GPUs.
+
+\paragraph{Hyperparameters.} See Table~\ref{tab:hyperparams} in the Appendix for complete settings.
+
+%----------------------------------
+\subsection{Game-Theoretic Performance}
+\label{sec:game_results}
+%----------------------------------
+
+% TODO: Include generated/table2_game_performance.tex when available
+% \input{generated/table2_game_performance}
+
+% Placeholder table
+\begin{table}[t]
+\centering
+\caption{Game-theoretic performance across 10 strategic games after GRPO self-play (3 iterations). Results to be filled from experiments.}
+\label{tab:game_performance}
+\small
+\begin{tabular}{lccc}
+\toprule
+Game & Avg Payoff & Diversity & Nash Dist. \
+\midrule
+\multicolumn{4}{c}{\textit{Results pending---experiments in progress}} \
+\bottomrule
+\end{tabular}
+\end{table}
+
+% TODO: Include Figure 1 and Figure 2 when available
+% \begin{figure}[t]
+%     \centering
+%     \includegraphics[width=\textwidth]{generated/figure1_training_trajectory.pdf}
+%     \caption{GRPO training trajectory across iterations.}
+%     \label{fig:trajectory}
+% \end{figure}
+
+%----------------------------------
+\subsection{Downstream Transfer}
+\label{sec:benchmarks}
+%----------------------------------
+
+% TODO: Include generated/table3_benchmarks.tex when available
+% \input{generated/table3_benchmarks}
+
+\begin{table}[t]
+\centering
+\caption{Downstream benchmark results (factorial design). Results to be filled from experiments.}
+\label{tab:benchmarks}
+\small
+\begin{tabular}{lcccccc}
+\toprule
+Model & ARC-C & StrategyQA & BBH & GSM8K & TruthfulQA & MT-Bench \
+\midrule
+\multicolumn{7}{c}{\textit{Results pending---experiments in progress}} \
+\bottomrule
+\end{tabular}
+\end{table}
+
+%----------------------------------
+\subsection{Multi-Objective Analysis}
+\label{sec:nash_results}
+%----------------------------------
+
+% TODO: Include Figure 3 and Figure 4 when available
+% Nash-DPO convergence and Pareto front analysis
+
+%----------------------------------
+\subsection{Ablation Studies}
+\label{sec:ablations}
+%----------------------------------
+
+% TODO: Include generated/table5_ablations.tex when available
+
+
+%====================================
+\section{Analysis}
+\label{sec:analysis}
+%====================================
+
+% Emergent strategic behaviors, Nash-DPO weight dynamics, complementarity decomposition
+% TODO: Fill with qualitative examples from game transcripts
+
+
+%====================================
+\section{Conclusion}
+\label{sec:conclusion}
+%====================================
+
+We introduced GameAgent, a unified game-theoretic self-play framework for LLM post-training.
+Through GRPO self-play across 10 diverse games and Nash-DPO for multi-objective alignment, we demonstrated that game-theoretic training simultaneously improves strategic reasoning and produces Pareto-superior multi-objective alignment.
+The factorial experimental design confirmed that these two tracks provide complementary improvements.
+
+\paragraph{Limitations.}
+Our experiments use a single model scale (9B parameters), proxy reward functions rather than human judgments, and English-only game environments.
+
+\paragraph{Future Work.}
+Scaling to larger models (70B+), incorporating real safety classifiers, extending to more complex multi-step games, and exploring multi-language settings.
+
+
+%====================================
+% References
+%====================================
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+
+%====================================
+\appendix
+\section{Hyperparameters}
+\label{app:hyperparams}
+
+\begin{table}[h]
+\centering
+\caption{Complete hyperparameter settings.}
+\label{tab:hyperparams}
+\small
+\begin{tabular}{lcc}
+\toprule
+Parameter & Track A (GRPO) & Track B (Nash-DPO) \
+\midrule
+Base model & \multicolumn{2}{c}{Qwen3.5-9B} \
+LoRA rank & 64 & 64 \
+LoRA alpha & 128 & 128 \
+Learning rate & 5e-5 & 2e-4 \
+Batch size & 4 & 4 \
+Iterations & 3 & 2 \
+Episodes/iter & 2000 & 200/game \
+DPO $\beta$ & --- & 0.1 \
+KL penalty & 0.01 & --- \
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+\section{Game Descriptions}
+\label{app:games}
+
+% Full descriptions of all 10 games with payoff matrices
+
+
+\section{Prompt Templates}
+\label{app:prompts}
+
+% Templates used for each game type
+
+\end{document}

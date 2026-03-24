@@ -151,6 +151,8 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--batch_episodes", type=int, default=50,
                         help="Episodes between GPU cache clears")
+    parser.add_argument("--games", type=str, default=None,
+                        help="Comma-separated subset of scenario names to generate")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -164,7 +166,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model_name = config["model"]["base_model"]
-    logger.info("Loading base model: %s", model_name)
+    logger.info("Loading base model: %s on %s", model_name, device)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -172,13 +174,23 @@ def main():
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16,
-        trust_remote_code=True, device_map="auto",
+        trust_remote_code=True, device_map=device,
     )
     model.eval()
     if model.generation_config.pad_token_id is None:
         model.generation_config.pad_token_id = tokenizer.pad_token_id
 
-    scenario_names = list(config["scenarios"].keys())
+    all_scenarios = list(config["scenarios"].keys())
+    if args.games:
+        scenario_names = [g.strip() for g in args.games.split(",")
+                          if g.strip() in config["scenarios"]]
+        if not scenario_names:
+            logger.error("No valid games found in --games=%s (available: %s)",
+                         args.games, all_scenarios)
+            sys.exit(1)
+        logger.info("Running subset: %s", scenario_names)
+    else:
+        scenario_names = all_scenarios
     global_stats = {}
 
     for scenario_name in scenario_names:

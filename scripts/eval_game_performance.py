@@ -22,7 +22,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.game_environments import ALL_GAMES, list_games
+from src.game_environments_simple import ALL_GAMES, list_games
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
@@ -61,6 +61,8 @@ def load_model(path, base_model=None):
             base_model, torch_dtype=torch.bfloat16,
             device_map="auto", trust_remote_code=True,
         )
+        if len(tok) > model.config.vocab_size:
+            model.resize_token_embeddings(len(tok))
         try:
             model = PeftModel.from_pretrained(model, path)
         except Exception:
@@ -70,6 +72,8 @@ def load_model(path, base_model=None):
             path, torch_dtype=torch.bfloat16,
             device_map="auto", trust_remote_code=True,
         )
+        if len(tok) > model.config.vocab_size:
+            model.resize_token_embeddings(len(tok))
     model.eval()
     return model, tok
 

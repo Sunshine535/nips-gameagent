@@ -21,7 +21,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from src.game_environments import create_environment
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -37,6 +36,8 @@ def load_model(model_dir, base_model_name):
     model = AutoModelForCausalLM.from_pretrained(
         base_model_name, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="auto",
     )
+    if len(tokenizer) > model.config.vocab_size:
+        model.resize_token_embeddings(len(tokenizer))
     if os.path.exists(os.path.join(model_dir, "adapter_config.json")):
         model = PeftModel.from_pretrained(model, model_dir)
         logger.info("Loaded adapter from %s", model_dir)

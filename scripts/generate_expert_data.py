@@ -39,6 +39,8 @@ def parse_args():
     p.add_argument("--max_new_tokens", type=int, default=128)
     p.add_argument("--temperature", type=float, default=0.7)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--games", type=str, default=None,
+                   help="Comma-separated subset of game names to generate")
     return p.parse_args()
 
 
@@ -100,16 +102,30 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16,
-        device_map="auto", trust_remote_code=True,
+        device_map=device, trust_remote_code=True,
     )
+    if len(tokenizer) > model.config.vocab_size:
+        model.resize_token_embeddings(len(tokenizer))
     model.eval()
+
+    if args.games:
+        selected = {g.strip() for g in args.games.split(",")}
+        game_items = {k: v for k, v in ALL_GAMES.items() if k in selected}
+        if not game_items:
+            logger.error("No valid games in --games=%s (available: %s)",
+                         args.games, list(ALL_GAMES.keys()))
+            sys.exit(1)
+        logger.info("Running subset: %s", list(game_items.keys()))
+    else:
+        game_items = ALL_GAMES
 
     all_episodes = []
     per_game_stats = {}
 
-    for game_name, game in ALL_GAMES.items():
+    for game_name, game in game_items.items():
         logger.info("Playing %d episodes of %s", args.episodes_per_game, game_name)
         episodes = play_episodes(model, tokenizer, game, args.episodes_per_game,
                                  args.max_new_tokens, args.temperature)
@@ -125,6 +141,15 @@ def main():
             "mean_payoff_top": sum(e["payoff"] for e in top_episodes) / max(len(top_episodes), 1),
             "nash_rate": sum(1 for e in episodes if e["is_nash"]) / max(len(episodes), 1),
         }
+
+        per_game_path = os.path.join(args.output_dir, f"expert_{game_name}.jsonl")
+        with open(per_game_path, "w") as f:
+            for ep in top_episodes:
+                record = {"prompt": ep["prompt"], "response": ep["response"],
+                          "game": ep["game"], "payoff": ep["payoff"]}
+                f.write(json.dumps(record) + "\n")
+        logger.info("  Saved %d records -> %s", len(top_episodes), per_game_path)
+
         all_episodes.extend(top_episodes)
 
     import random

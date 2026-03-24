@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""
+"""DEPRECATED — Replaced by scripts/eval_benchmarks.py
+
+The majority_vote_select logic has been migrated to src/game_protocol.py.
+Use eval_benchmarks.py for all evaluation needs:
+    python scripts/eval_benchmarks.py --benchmarks gsm8k truthfulqa mt_bench
+
+Original purpose:
 Evaluate GameRefine outputs on GSM8K, TruthfulQA, and MT-Bench style tasks.
 Compares: individual agents, Nash-equilibrium merged, and majority-vote selection.
 """

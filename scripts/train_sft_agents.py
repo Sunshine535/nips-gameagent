@@ -21,6 +21,7 @@ from trl import SFTConfig, SFTTrainer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.game_environments_simple import list_games
+from src.game_protocol import compute_agent_reward
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
@@ -61,33 +62,54 @@ def load_cfg(path):
         return yaml.safe_load(f)
 
 
-def load_expert_data(path, game_subset=None):
-    records = []
+def load_expert_data(path, game_subset=None, reward_weights=None,
+                     top_fraction=0.5):
+    """Load expert data, optionally filtering by game subset and reward score.
+
+    When *reward_weights* is given (from agent_roles.yaml), records are scored
+    and only the top *top_fraction* are kept — this reward-based curriculum was
+    originally in the GameRefine pipeline and improves SFT quality.
+    """
+    raw = []
     with open(path) as f:
         for line in f:
             rec = json.loads(line)
             if game_subset and rec.get("game") not in game_subset:
                 continue
-            records.append({
-                "text": f"### Game Prompt:\n{rec['prompt']}\n\n### Response:\n{rec['response']}"
-            })
+            raw.append(rec)
+
+    if reward_weights and raw:
+        for rec in raw:
+            rec["_score"] = compute_agent_reward(
+                rec["response"], reward_weights, reference=None,
+            )
+        raw.sort(key=lambda r: r["_score"], reverse=True)
+        cutoff = max(1, int(len(raw) * top_fraction))
+        raw = raw[:cutoff]
+
+    records = [
+        {"text": f"### Game Prompt:\n{r['prompt']}\n\n### Response:\n{r['response']}"}
+        for r in raw
+    ]
     return Dataset.from_list(records)
 
 
 def train_agent(agent_id, game_subset, model_name, expert_path, output_dir,
-                lora_cfg, train_cfg, seed):
+                lora_cfg, train_cfg, seed, reward_weights=None):
     logger.info("=" * 60)
     logger.info("Training agent: %s", agent_id)
     logger.info("Game subset: %s", game_subset)
     logger.info("=" * 60)
 
     os.makedirs(output_dir, exist_ok=True)
-    dataset = load_expert_data(expert_path, game_subset)
+    dataset = load_expert_data(expert_path, game_subset,
+                               reward_weights=reward_weights)
     logger.info("Loaded %d expert samples for %s", len(dataset), agent_id)
 
     if len(dataset) == 0:
         logger.warning("No data for %s, loading all games", agent_id)
-        dataset = load_expert_data(expert_path, None)
+        dataset = load_expert_data(expert_path, None,
+                                   reward_weights=reward_weights)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True,
                                               padding_side="right")
@@ -115,7 +137,7 @@ def train_agent(agent_id, game_subset, model_name, expert_path, output_dir,
         logging_steps=10,
         save_steps=500,
         save_total_limit=2,
-        max_seq_length=train_cfg.get("max_seq_length", 1024),
+        max_length=train_cfg.get("max_seq_length", 1024),
         dataset_text_field="text",
         report_to="none",
         seed=seed,
@@ -165,6 +187,7 @@ def main():
     }
 
     agents = {args.agent: AGENT_GAME_SUBSETS[args.agent]} if args.agent else AGENT_GAME_SUBSETS
+    agent_cfgs = cfg.get("agents", {})
     all_info = {}
 
     for agent_id, game_subset in agents.items():
@@ -172,9 +195,10 @@ def main():
         if os.path.exists(os.path.join(out, "sft_agent_info.json")):
             logger.info("Skipping %s (already trained)", agent_id)
             continue
+        rw = agent_cfgs.get(agent_id, {}).get("reward_weights")
         info = train_agent(
             agent_id, game_subset, model_name, args.expert_data, out,
-            lora_cfg, train_cfg, args.seed,
+            lora_cfg, train_cfg, args.seed, reward_weights=rw,
         )
         all_info[agent_id] = info
 

@@ -31,13 +31,14 @@ class NashDPOLoss(nn.Module):
         num_agents: int = 4,
         nash_iterations: int = 3,
         label_smoothing: float = 0.0,
+        weight_scheme: str = "nash",
     ):
         super().__init__()
         self.beta = beta
         self.num_agents = num_agents
         self.nash_iterations = nash_iterations
         self.label_smoothing = label_smoothing
-        # Learnable per-agent weights for Nash bargaining
+        self.weight_scheme = weight_scheme
         self.agent_weights = nn.Parameter(torch.ones(num_agents) / num_agents)
 
     def forward(
@@ -67,8 +68,13 @@ class NashDPOLoss(nn.Module):
         # Standard DPO loss
         dpo_loss = -F.logsigmoid(logits)
 
-        if agent_preference_scores is not None:
+        if agent_preference_scores is not None and self.weight_scheme == "nash":
             nash_weights = self._compute_nash_weights(agent_preference_scores)
+            weighted_loss = (dpo_loss.unsqueeze(1) * nash_weights).sum(dim=1)
+            loss = weighted_loss.mean()
+        elif agent_preference_scores is not None and self.weight_scheme == "equal":
+            B = agent_preference_scores.shape[0]
+            nash_weights = torch.ones(B, self.num_agents, device=dpo_loss.device) / self.num_agents
             weighted_loss = (dpo_loss.unsqueeze(1) * nash_weights).sum(dim=1)
             loss = weighted_loss.mean()
         else:

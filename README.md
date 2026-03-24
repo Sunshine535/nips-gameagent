@@ -57,26 +57,44 @@ The key insight is that game-theoretic self-play provides a unified mechanism fo
 ```
 nips-gameagent/
 ├── src/
+│   ├── __init__.py
 │   ├── game_environments.py         # 10 multi-round game environments (GRPO track)
 │   ├── game_environments_simple.py  # 8 single-round games (Nash-DPO track)
-│   ├── game_protocol.py             # Cross-evaluation protocol & reward functions
-│   └── nash_dpo.py                  # Multi-objective Nash-DPO loss
+│   ├── game_protocol.py             # Cross-evaluation protocol, reward functions, majority voting
+│   ├── nash_dpo.py                  # Multi-objective Nash-DPO loss
+│   ├── reward_models.py             # Robust reward functions (NLI, anti-hacking)
+│   └── visualization.py             # Publication-quality plots (6 types)
 ├── scripts/
-│   ├── generate_sft_data.py         # GRPO SFT data generation (10 games)
-│   ├── generate_expert_data.py      # Nash-DPO expert data generation (8 games)
-│   ├── train_sft_warmup.py          # GRPO warmup: 4 agents × 2-3 games
-│   ├── train_sft_agents.py          # Nash-DPO warmup: 4 role agents
+│   ├── run_all_experiments.sh       # ★ Master pipeline (both tracks)
+│   ├── gpu_utils.sh                 # Auto GPU detection (4-8 A100 adaptive)
+│   │
+│   │  # Track A: GRPO Self-Play
+│   ├── generate_sft_data.py         # SFT data generation (10 games)
+│   ├── train_sft_warmup.py          # Warmup: 4 agents × 2-3 games
 │   ├── run_grpo_self_play.py        # GRPO self-play loop (5 iterations)
-│   ├── train_nash_dpo.py            # Nash-DPO iterative training (3 iterations)
 │   ├── run_cross_game_transfer.py   # Cross-game transfer evaluation
-│   ├── run_grpo_vs_nash_comparison.py # Head-to-head GRPO vs Nash-DPO
+│   │
+│   │  # Track B: Nash-DPO Self-Play
+│   ├── generate_expert_data.py      # Expert data generation (8 games)
+│   ├── train_sft_agents.py          # Role SFT: 4 agents + reward-based curriculum
+│   ├── train_nash_dpo.py            # Nash-DPO iterative training (3 iterations)
+│   │
+│   │  # Evaluation & Comparison
+│   ├── run_grpo_vs_nash_comparison.py  # Head-to-head GRPO vs Nash-DPO
 │   ├── eval_benchmarks.py           # Unified: ARC + StrategyQA + BBH + GSM8K + TruthfulQA + MT-Bench
 │   ├── eval_game_performance.py     # Game-theoretic performance metrics
-│   ├── gpu_utils.sh                 # Auto GPU detection (4-8 A100 adaptive)
-│   └── run_all_experiments.sh       # Master pipeline
+│   ├── collect_and_visualize.py     # Result collection + HTML report
+│   │
+│   │  # Deprecated (from GameRefine, superseded by above)
+│   ├── train_agents.py              # → use train_sft_agents.py
+│   ├── run_self_play.py             # → use train_nash_dpo.py
+│   ├── run_gamerefine.sh            # → use run_all_experiments.sh --skip_grpo
+│   └── eval_gamerefine.py           # → use eval_benchmarks.py
 ├── configs/
 │   ├── game_scenarios.yaml          # 10 game definitions + GRPO hyperparams
 │   └── agent_roles.yaml             # 4 agent roles + Nash-DPO hyperparams
+├── paper/
+│   └── outline.md                   # NeurIPS paper outline
 ├── requirements.txt
 ├── setup.sh
 └── README.md

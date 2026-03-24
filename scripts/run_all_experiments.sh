@@ -6,14 +6,14 @@
 #   Track A (GRPO): Strategic decision-making via multi-agent game self-play
 #   Track B (Nash-DPO): Multi-objective alignment via asymmetric agent roles
 #
-# Pipeline:
-#   1. Generate SFT data (GRPO track: 10 games × 5000 episodes)
-#   2. Train 4 SFT warmup agents (GRPO track, LoRA, 2-3 games each)
-#   3. GRPO self-play (5 iterations, 10K episodes/iter)
-#   4. Generate expert data (Nash-DPO track: 8 simple games)
-#   5. Train 4 role-specialized SFT agents (Nash-DPO track)
-#   6. Iterative Nash-DPO self-play (3 iterations)
-#   7. Cross-game transfer evaluation
+# Pipeline (default/full mode — --quick uses smaller counts):
+#   1. Generate SFT data (GRPO track: 10 games × 500 episodes)
+#   2. Train 4 SFT warmup agents (GRPO track, LoRA, 2 games each)
+#   3. GRPO self-play (3 iterations, 2K episodes/iter)
+#   4. Cross-game transfer evaluation
+#   5. Generate expert data (Nash-DPO track: 8 simple games × 500 episodes)
+#   6. Train 4 role-specialized SFT agents (Nash-DPO track)
+#   7. Iterative Nash-DPO self-play (2 iterations)
 #   8. GRPO vs Nash-DPO cross-comparison
 #   9. Unified benchmark evaluation (ARC + StrategyQA + BBH + GSM8K + TruthfulQA + MT-Bench)
 #   10. Ablation studies
@@ -62,17 +62,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [ "$QUICK" = true ]; then
-    GRPO_EPISODES_PER_GAME=100
-    GRPO_SFT_EPISODES=500
+    GRPO_SFT_EPISODES=100
     GRPO_ITERS=1
     GRPO_EPS_PER_ITER=500
     NASH_EXPERT_EPISODES=100
     NASH_ITERS=1
     NASH_GAMES_PER_ITER=50
     EVAL_EPISODES=5
-    EVAL_SAMPLES=50
+    BENCH_SAMPLES=50
 else
-    GRPO_EPISODES_PER_GAME=500
     GRPO_SFT_EPISODES=500
     GRPO_ITERS=3
     GRPO_EPS_PER_ITER=2000
@@ -80,7 +78,7 @@ else
     NASH_ITERS=2
     NASH_GAMES_PER_ITER=200
     EVAL_EPISODES=20
-    EVAL_SAMPLES=500
+    BENCH_SAMPLES=500
 fi
 
 mkdir -p "$DATA_DIR" "$RESULTS_DIR" "$LOG_DIR"
@@ -99,16 +97,50 @@ run_timed() {
 # Track A: GRPO Self-Play (Strategic Decision-Making)
 # ============================================================================
 
+parallel_generate() {
+    local script="$1" config="$2" episodes="$3" outdir="$4"
+    shift 4
+    local extra_args=("$@")
+
+    if [ "${NUM_GPUS:-4}" -ge 4 ]; then
+        log "Parallel data generation on ${NUM_GPUS:-4} GPUs"
+        if [ "$script" = "scripts/generate_sft_data.py" ]; then
+            local G0="prisoners_dilemma,coordination_game,battle_of_sexes"
+            local G1="stag_hunt,chicken,matching_pennies"
+            local G2="public_goods,ultimatum"
+            local G3="auction,negotiation"
+        else
+            local G0="prisoners_dilemma,battle_of_sexes"
+            local G1="stag_hunt,chicken"
+            local G2="matching_pennies,public_goods"
+            local G3="ultimatum,coordination"
+        fi
+        CUDA_VISIBLE_DEVICES=0 python "$script" --config "$config" \
+            --episodes_per_game "$episodes" --output_dir "$outdir" \
+            --games "$G0" "${extra_args[@]}" 2>&1 | tee "${LOG_DIR}/${script##*/}_gpu0.log" &
+        CUDA_VISIBLE_DEVICES=1 python "$script" --config "$config" \
+            --episodes_per_game "$episodes" --output_dir "$outdir" \
+            --games "$G1" "${extra_args[@]}" 2>&1 | tee "${LOG_DIR}/${script##*/}_gpu1.log" &
+        CUDA_VISIBLE_DEVICES=2 python "$script" --config "$config" \
+            --episodes_per_game "$episodes" --output_dir "$outdir" \
+            --games "$G2" "${extra_args[@]}" 2>&1 | tee "${LOG_DIR}/${script##*/}_gpu2.log" &
+        CUDA_VISIBLE_DEVICES=3 python "$script" --config "$config" \
+            --episodes_per_game "$episodes" --output_dir "$outdir" \
+            --games "$G3" "${extra_args[@]}" 2>&1 | tee "${LOG_DIR}/${script##*/}_gpu3.log" &
+        wait
+    else
+        python "$script" --config "$config" \
+            --episodes_per_game "$episodes" --output_dir "$outdir" "${extra_args[@]}"
+    fi
+}
+
 if [ "$SKIP_GRPO" = false ]; then
     log "========== Track A: GRPO Self-Play =========="
 
     run_timed "A1_generate_sft_data" \
-        python scripts/generate_sft_data.py \
-            --config "$GAME_CONFIG" \
-            --episodes_per_game "$GRPO_SFT_EPISODES" \
-            --top_fraction 0.3 \
-            --output_dir "$DATA_DIR" \
-            --seed "$SEED"
+        parallel_generate scripts/generate_sft_data.py "$GAME_CONFIG" \
+            "$GRPO_SFT_EPISODES" "$DATA_DIR" \
+            --top_fraction 0.3 --seed "$SEED"
 
     run_timed "A2_train_sft_warmup" \
         python scripts/train_sft_warmup.py \
@@ -117,7 +149,8 @@ if [ "$SKIP_GRPO" = false ]; then
             --output_dir "$RESULTS_DIR/sft_agents" \
             --num_epochs 2 \
             --lora_r 16 --lora_alpha 32 \
-            --batch_size 4 --gradient_accumulation_steps 4
+            --batch_size 4 --gradient_accumulation_steps 4 \
+            --parallel
 
     run_timed "A3_grpo_self_play" \
         python scripts/run_grpo_self_play.py \
@@ -148,12 +181,29 @@ if [ "$SKIP_NASH" = false ]; then
     log "========== Track B: Nash-DPO Self-Play =========="
 
     run_timed "B1_generate_expert_data" \
-        python scripts/generate_expert_data.py \
-            --config "$ROLE_CONFIG" \
-            --output_dir "$RESULTS_DIR/expert_data" \
-            --episodes_per_game "$NASH_EXPERT_EPISODES" \
-            --top_fraction 0.3 \
-            --seed "$SEED"
+        parallel_generate scripts/generate_expert_data.py "$ROLE_CONFIG" \
+            "$NASH_EXPERT_EPISODES" "$RESULTS_DIR/expert_data" \
+            --top_fraction 0.3 --seed "$SEED"
+
+    if [ "${NUM_GPUS:-4}" -ge 4 ]; then
+        log "Merging per-game expert data into train/val splits"
+        python3 -c "
+import json, os, random, sys
+random.seed($SEED)
+d = '$RESULTS_DIR/expert_data'
+all_ep = []
+for f in sorted(os.listdir(d)):
+    if f.startswith('expert_') and f.endswith('.jsonl') and f not in ('expert_train.jsonl','expert_val.jsonl'):
+        with open(os.path.join(d, f)) as fh:
+            all_ep.extend(json.loads(l) for l in fh)
+random.shuffle(all_ep)
+val_n = int(len(all_ep) * 0.1)
+for name, data in [('train', all_ep[val_n:]), ('val', all_ep[:val_n])]:
+    with open(os.path.join(d, f'expert_{name}.jsonl'), 'w') as fh:
+        for r in data: fh.write(json.dumps(r) + '\n')
+print(f'Merged: {len(all_ep)} total -> train={len(all_ep)-val_n} val={val_n}')
+"
+    fi
 
     run_timed "B2_train_sft_role_agents" \
         python scripts/train_sft_agents.py \

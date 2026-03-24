@@ -93,7 +93,7 @@ def train_single_agent(
 
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16,
-        trust_remote_code=True, attn_implementation="flash_attention_2",
+        trust_remote_code=True,
     )
 
     peft_config = LoraConfig(
@@ -120,7 +120,7 @@ def train_single_agent(
         bf16=True,
         logging_steps=10,
         save_strategy="epoch",
-        max_seq_length=args.max_seq_length,
+        max_length=args.max_seq_length,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         dataset_text_field="text",
@@ -173,6 +173,8 @@ def main():
     parser.add_argument("--max_seq_length", type=int, default=2048)
     parser.add_argument("--agents", type=str, nargs="*", default=None,
                         help="Train specific agents only (e.g., agent_0 agent_2)")
+    parser.add_argument("--parallel", action="store_true",
+                        help="Train all agents in parallel (one per GPU)")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -183,26 +185,54 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     agents_to_train = args.agents or list(AGENT_GAME_ASSIGNMENTS.keys())
-    all_meta = {}
 
-    for agent_name in agents_to_train:
-        if agent_name not in AGENT_GAME_ASSIGNMENTS:
-            logger.warning("Unknown agent: %s, skipping", agent_name)
-            continue
-        game_names = AGENT_GAME_ASSIGNMENTS[agent_name]
-        meta = train_single_agent(
-            agent_name, game_names, model_name, args.data_dir, str(output_dir), args,
-        )
-        all_meta[agent_name] = meta
+    if args.parallel and torch.cuda.device_count() >= len(agents_to_train):
+        import subprocess
+        procs = []
+        for i, agent_name in enumerate(agents_to_train):
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(i)
+            cmd = [
+                sys.executable, __file__,
+                "--config", args.config,
+                "--data_dir", args.data_dir,
+                "--output_dir", str(output_dir),
+                "--num_epochs", str(args.num_epochs),
+                "--batch_size", str(args.batch_size),
+                "--gradient_accumulation_steps", str(args.gradient_accumulation_steps),
+                "--learning_rate", str(args.learning_rate),
+                "--lora_r", str(args.lora_r),
+                "--lora_alpha", str(args.lora_alpha),
+                "--max_seq_length", str(args.max_seq_length),
+                "--agents", agent_name,
+            ]
+            logger.info("Launching %s on GPU %d", agent_name, i)
+            procs.append(subprocess.Popen(cmd, env=env))
+        for p in procs:
+            p.wait()
+            if p.returncode != 0:
+                logger.error("Agent training failed with code %d", p.returncode)
+                sys.exit(p.returncode)
+    else:
+        all_meta = {}
+        for agent_name in agents_to_train:
+            if agent_name not in AGENT_GAME_ASSIGNMENTS:
+                logger.warning("Unknown agent: %s, skipping", agent_name)
+                continue
+            game_names = AGENT_GAME_ASSIGNMENTS[agent_name]
+            meta = train_single_agent(
+                agent_name, game_names, model_name, args.data_dir, str(output_dir), args,
+            )
+            all_meta[agent_name] = meta
 
-    summary_path = output_dir / "sft_warmup_summary.json"
-    with open(summary_path, "w") as f:
-        json.dump(all_meta, f, indent=2)
+        summary_path = output_dir / "sft_warmup_summary.json"
+        with open(summary_path, "w") as f:
+            json.dump(all_meta, f, indent=2)
 
-    logger.info("=== SFT Warmup Complete ===")
-    for name, meta in all_meta.items():
-        logger.info("  %s: games=%s, samples=%d", name, meta["games"], meta["dataset_size"])
-    logger.info("Summary saved to %s", summary_path)
+        logger.info("=== SFT Warmup Complete ===")
+        for name, meta in all_meta.items():
+            logger.info("  %s: games=%s, samples=%d", name, meta["games"], meta["dataset_size"])
+        logger.info("Summary saved to %s", summary_path)
 
 
 if __name__ == "__main__":

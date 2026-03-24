@@ -126,8 +126,10 @@ def train_agent_on_games(
     if base_model is None:
         model = AutoModelForCausalLM.from_pretrained(
             model_name, torch_dtype=torch.bfloat16,
-            trust_remote_code=True, attn_implementation="flash_attention_2",
+            trust_remote_code=True,
         )
+        if len(tokenizer) > model.config.vocab_size:
+            model.resize_token_embeddings(len(tokenizer))
     else:
         model = base_model
 
@@ -151,7 +153,7 @@ def train_agent_on_games(
         bf16=True,
         logging_steps=20,
         save_strategy="no",
-        max_seq_length=2048,
+        max_length=2048,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
         dataset_text_field="text",

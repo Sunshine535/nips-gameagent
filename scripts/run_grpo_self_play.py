@@ -130,10 +130,14 @@ def load_agent(agent_name: str, sft_dir: str, model_name: str, device):
 
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16,
-        trust_remote_code=True, attn_implementation="flash_attention_2",
+        trust_remote_code=True,
         device_map={"": device},
     )
     base_model.config.use_cache = False
+
+    if len(tokenizer) > base_model.config.vocab_size:
+        base_model.resize_token_embeddings(len(tokenizer))
+        logger.info("Resized embeddings: %d -> %d", base_model.config.vocab_size, len(tokenizer))
 
     if agent_path.exists() and (agent_path / "adapter_config.json").exists():
         model = PeftModel.from_pretrained(base_model, str(agent_path), is_trainable=True)
@@ -152,8 +156,13 @@ def load_agent(agent_name: str, sft_dir: str, model_name: str, device):
     return model, tokenizer
 
 
-def play_self_play_episode(agents, tokenizers, env, player_ids, scenario_name, device, temperature=0.7):
-    """Play one episode with different agents as players."""
+def get_model_device(model):
+    """Get the device a model's parameters are on."""
+    return next(model.parameters()).device
+
+
+def play_self_play_episode(agents, tokenizers, env, player_ids, scenario_name, temperature=0.7):
+    """Play one episode with different agents as players, each on its own device."""
     state = env.reset()
     trajectories = {pid: [] for pid in player_ids}
 
@@ -172,34 +181,45 @@ def play_self_play_episode(agents, tokenizers, env, player_ids, scenario_name, d
             agent_name = player_to_agent[pid]
             model = agents[agent_name]
             tokenizer = tokenizers[agent_name]
+            dev = get_model_device(model)
 
             action_space = env.get_action_space(pid)
             game_prompt = env.get_prompt(state, pid)
             prompt = format_decision_prompt(game_prompt, action_space)
 
-            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024).to(device)
-            with torch.no_grad():
-                outputs = model.generate(
-                    **inputs, max_new_tokens=80, do_sample=True,
-                    temperature=temperature, top_p=0.9,
-                    pad_token_id=tokenizer.pad_token_id,
-                )
-            response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-            action = parse_action(response, action_space)
+            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024).to(dev)
+            try:
+                with torch.no_grad():
+                    outputs = model.generate(
+                        **inputs, max_new_tokens=80, do_sample=True,
+                        temperature=temperature, top_p=0.9,
+                        pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                    )
+                response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+                action = parse_action(response, action_space)
+            except RuntimeError:
+                torch.cuda.empty_cache()
+                action = random.choice(action_space)
+                response = f"ACTION: {action}"
             actions[pid] = action
 
             action_text = f"ACTION: {action}"
-            action_inputs = tokenizer(
-                prompt + action_text, return_tensors="pt", truncation=True, max_length=1024
-            ).to(device)
-            with torch.no_grad():
-                logits = model(**action_inputs).logits
-            prompt_len = inputs["input_ids"].shape[1]
-            action_logits = logits[0, prompt_len - 1:-1]
-            action_token_ids = action_inputs["input_ids"][0, prompt_len:]
-            log_probs = F.log_softmax(action_logits, dim=-1)
-            token_log_probs = log_probs.gather(1, action_token_ids.unsqueeze(1)).squeeze(1)
-            avg_log_prob = token_log_probs.mean().item()
+            try:
+                action_inputs = tokenizer(
+                    prompt + action_text, return_tensors="pt", truncation=True, max_length=1024
+                ).to(dev)
+                with torch.no_grad():
+                    logits = model(**action_inputs).logits
+                prompt_len = inputs["input_ids"].shape[1]
+                action_logits = logits[0, prompt_len - 1:-1]
+                action_token_ids = action_inputs["input_ids"][0, prompt_len:]
+                log_probs = F.log_softmax(action_logits, dim=-1)
+                token_log_probs = log_probs.gather(1, action_token_ids.unsqueeze(1)).squeeze(1)
+                avg_log_prob = token_log_probs.mean().item()
+            except RuntimeError:
+                torch.cuda.empty_cache()
+                avg_log_prob = -1.0
 
             trajectories[pid].append({
                 "prompt": prompt,
@@ -218,8 +238,9 @@ def play_self_play_episode(agents, tokenizers, env, player_ids, scenario_name, d
     return trajectories, state
 
 
-def grpo_update_agent(model, tokenizer, agent_trajectories, optimizer, grpo_cfg, device):
+def grpo_update_agent(model, tokenizer, agent_trajectories, optimizer, grpo_cfg):
     """Apply GRPO update to a single agent using its collected trajectories."""
+    dev = get_model_device(model)
     clip_range = grpo_cfg["clip_range"]
     kl_coeff = grpo_cfg["kl_coeff"]
     gamma = grpo_cfg["gamma"]
@@ -231,7 +252,7 @@ def grpo_update_agent(model, tokenizer, agent_trajectories, optimizer, grpo_cfg,
         if len(traj) < 2:
             continue
 
-        rewards = torch.tensor([t["reward"] for t in traj], device=device)
+        rewards = torch.tensor([t["reward"] for t in traj], device=dev)
         returns = torch.zeros_like(rewards)
         G = 0.0
         for i in reversed(range(len(rewards))):
@@ -249,7 +270,7 @@ def grpo_update_agent(model, tokenizer, agent_trajectories, optimizer, grpo_cfg,
             inputs = tokenizer(
                 prompt + f"ACTION: {step_data['action']}",
                 return_tensors="pt", truncation=True, max_length=1024,
-            ).to(device)
+            ).to(dev)
             labels = inputs["input_ids"]
 
             with torch.cuda.amp.autocast(dtype=torch.bfloat16):
@@ -280,7 +301,7 @@ def grpo_update_agent(model, tokenizer, agent_trajectories, optimizer, grpo_cfg,
     return {"loss": total_loss / max(num_updates, 1), "num_updates": num_updates}
 
 
-def evaluate_agents(agents, tokenizers, config, device, num_episodes=20):
+def evaluate_agents(agents, tokenizers, config, num_episodes=20):
     """Evaluate all agents across all games."""
     results = {}
     scenario_names = list(config["scenarios"].keys())
@@ -294,7 +315,7 @@ def evaluate_agents(agents, tokenizers, config, device, num_episodes=20):
         for _ in range(num_episodes):
             env = create_environment(scenario_name, config)
             _, final_state = play_self_play_episode(
-                agents, tokenizers, env, player_ids, scenario_name, device, temperature=0.3,
+                agents, tokenizers, env, player_ids, scenario_name, temperature=0.3,
             )
             for pid in player_ids:
                 total_payoffs[pid] += final_state.scores.get(pid, 0.0)
@@ -338,28 +359,31 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
     model_name = config["model"]["base_model"]
     grpo_cfg = config["grpo"]
     scenario_names = list(config["scenarios"].keys())
     episodes_per_game = args.episodes_per_iter // len(scenario_names)
 
     logger.info("=== GRPO Self-Play Training ===")
-    logger.info("Iterations: %d, Episodes/iter: %d, Games: %d",
-                args.num_iterations, args.episodes_per_iter, len(scenario_names))
+    logger.info("Iterations: %d, Episodes/iter: %d, Games: %d, GPUs: %d",
+                args.num_iterations, args.episodes_per_iter, len(scenario_names), num_gpus)
 
     agents = {}
     tokenizers = {}
     optimizers = {}
 
-    for agent_name in AGENT_GAME_ASSIGNMENTS:
-        model, tokenizer = load_agent(agent_name, args.sft_dir, model_name, device)
+    agent_names_list = list(AGENT_GAME_ASSIGNMENTS.keys())
+    for i, agent_name in enumerate(agent_names_list):
+        agent_device = torch.device(f"cuda:{i % num_gpus}" if num_gpus > 0 else "cpu")
+        model, tokenizer = load_agent(agent_name, args.sft_dir, model_name, agent_device)
         agents[agent_name] = model
         tokenizers[agent_name] = tokenizer
         optimizers[agent_name] = torch.optim.AdamW(
             [p for p in model.parameters() if p.requires_grad],
             lr=args.learning_rate,
         )
+        logger.info("  %s -> %s", agent_name, agent_device)
 
     training_log = []
 
@@ -380,7 +404,7 @@ def main():
                 env = create_environment(scenario_name, config)
                 trajectories, final_state = play_self_play_episode(
                     agents, tokenizers, env, player_ids, scenario_name,
-                    device, args.temperature,
+                    args.temperature,
                 )
 
                 for pid, traj in trajectories.items():
@@ -401,7 +425,7 @@ def main():
             stats = grpo_update_agent(
                 model, tokenizers[agent_name],
                 agent_trajectories[agent_name],
-                optimizers[agent_name], grpo_cfg, device,
+                optimizers[agent_name], grpo_cfg,
             )
             update_stats[agent_name] = stats
             logger.info("    %s: loss=%.4f, updates=%d",
@@ -409,7 +433,7 @@ def main():
 
         logger.info("  Evaluating agents...")
         eval_results = evaluate_agents(
-            agents, tokenizers, config, device, args.eval_episodes,
+            agents, tokenizers, config, args.eval_episodes,
         )
 
         iter_log = {

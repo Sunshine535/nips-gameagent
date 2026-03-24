@@ -1,4 +1,4 @@
-# Merged requirements: nips-gameagent + nips-gamerefine
+# GameAgent: unified requirements
 # Use: pip install -r requirements.txt
 
 torch>=2.10.0
@@ -17,3 +17,6 @@ evaluate>=0.4.0
 # Training frameworks
 trl>=0.15.0
 peft>=0.15.0
+
+# Robust reward models
+sentence-transformers>=3.0.0

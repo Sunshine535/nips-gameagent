@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""
+"""DEPRECATED — Replaced by scripts/train_nash_dpo.py
+
+train_nash_dpo.py provides the same iterative self-play + Nash-DPO loop
+with game-specific prompts from game_environments_simple. Use:
+    python scripts/train_nash_dpo.py --config configs/agent_roles.yaml
+
+Original purpose:
 Multi-round game: each agent generates candidate -> agents cross-evaluate ->
 collect preference pairs -> Nash-DPO update.
 Implements iterative self-play between 4 specialized agents.

@@ -1,0 +1,87 @@
+project: GameAgent
+question: "Can game-theoretic self-play simultaneously improve strategic reasoning and multi-objective alignment in LLMs?"
+target_venue: NeurIPS 2026
+deadline: "2026-07-17"
+started: "2026-03-23"
+
+status: phase0_complete_ready_for_phase1
+current_focus: "Project merge complete. Ready for Phase 1: SFT data generation + warmup training on server."
+
+base_model: "Qwen/Qwen3.5-9B"
+compute:
+  server: "222.223.106.147:30022"
+  gpus: "4x NVIDIA H800 80GB"
+  user: "wujn@root@ssh-362.default"
+
+project_merge:
+  merged_from: "nips-gamerefine"
+  date: "2026-03-23"
+  components_migrated:
+    - "reward-based SFT data filtering → train_sft_agents.py"
+    - "majority_vote_select → game_protocol.py"
+    - "Nash-DPO self-play loop → train_nash_dpo.py"
+  legacy_results_reusable: false
+  reason: "heuristic rewards saturated at GRPO step ~300; training signal meaningless"
+
+hypotheses:
+  H1_grpo_strategic:
+    statement: "GRPO self-play across diverse games improves strategic reasoning (ARC, StrategyQA, BBH)"
+    status: untested
+    priority: high
+
+  H2_nash_dpo_alignment:
+    statement: "Nash-DPO with asymmetric agents achieves Pareto-optimal multi-objective alignment"
+    status: untested
+    priority: high
+
+  H3_cross_game_transfer:
+    statement: "Training on diverse games transfers better than single-game specialization"
+    status: untested
+    priority: high
+
+  H4_complementarity:
+    statement: "GRPO and Nash-DPO produce orthogonal improvements — combining both is best"
+    status: untested
+    priority: medium
+
+  H5_emergent_behavior:
+    statement: "Nash-DPO agents develop emergent strategic cooperation (yielding, specialization)"
+    status: untested
+    priority: medium
+
+metrics:
+  primary:
+    - "ARC-Challenge accuracy"
+    - "StrategyQA accuracy"
+    - "BBH accuracy"
+    - "GSM8K accuracy"
+    - "TruthfulQA accuracy"
+    - "MT-Bench score"
+  game:
+    - "Nash equilibrium rate"
+    - "Average payoff"
+    - "Strategy diversity (Shannon entropy)"
+    - "Nash distance (L2)"
+  alignment:
+    - "Per-agent reward (correctness, safety, efficiency, creativity)"
+    - "Elo ratings across Nash-DPO iterations"
+    - "Pareto hypervolume"
+
+baselines:
+  - "Qwen3.5-9B (base, no training)"
+  - "Single-agent GRPO"
+  - "Independent DPO per objective"
+  - "Best-of-N sampling"
+
+completed_work:
+  - "Reward function overhaul (NLI + anti-hacking)"
+  - "Anti-reward-hacking (length + repetition penalties)"
+  - "Bug fixes (3 scripts)"
+  - "Visualization pipeline (6 plot types)"
+  - "Paper outline (NeurIPS structure)"
+  - "Project merge (GameRefine → GameAgent)"
+  - "Config consistency fixes"
+  - "Auto-review loop (2 rounds, 15 issues fixed)"
+
+experiments_completed: 0
+last_updated: "2026-03-23"

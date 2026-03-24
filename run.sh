@@ -47,7 +47,7 @@ else
     echo "============================================================"
     echo " Pipeline failed (exit code: $EXIT_CODE)"
     echo " Check log: $PROJ_DIR/run.log"
-    echo " To resume: bash run.sh (completed phases are skipped)"
+    echo " To retry: bash run.sh"
     echo "============================================================"
     exit $EXIT_CODE
 fi

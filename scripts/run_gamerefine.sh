@@ -1,4 +1,18 @@
 #!/bin/bash
+# =========================================================================
+# DEPRECATED — Replaced by scripts/run_all_experiments.sh
+#
+# This was the original GameRefine pipeline. It has been superseded by the
+# unified GameAgent pipeline which covers both Track A (GRPO) and
+# Track B (Nash-DPO).
+#
+# Usage of the new pipeline:
+#   bash scripts/run_all_experiments.sh              # full run
+#   bash scripts/run_all_experiments.sh --skip_grpo  # Nash-DPO only (≈old GameRefine)
+#   bash scripts/run_all_experiments.sh --quick       # smoke test
+# =========================================================================
+#
+# Original purpose:
 # GameRefine: Asymmetric multi-agent self-play
 # Stage 1: Train 4 specialized agents (accuracy/safety/efficiency/creativity)
 # Stage 2: Multi-round self-play with Nash-DPO

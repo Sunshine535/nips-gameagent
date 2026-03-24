@@ -1,5 +1,6 @@
 model:
   base: "Qwen/Qwen3.5-9B"
+  base_model: "Qwen/Qwen3.5-9B"
   lora_r: 16
   lora_alpha: 32
   lora_dropout: 0.05
@@ -83,6 +84,6 @@ datasets:
     - coding
 
 output:
-  agents_dir: "./checkpoints/agents"
-  self_play_dir: "./checkpoints/self_play"
+  agents_dir: "./results/sft_role_agents"
+  self_play_dir: "./results/nash_dpo"
   results_dir: "./results"

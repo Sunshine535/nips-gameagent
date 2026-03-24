@@ -50,6 +50,9 @@ def parse_args():
     p.add_argument("--dpo_lr", type=float, default=5e-6)
     p.add_argument("--beta", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--nash_weights", type=str, default="nash",
+                   choices=["nash", "equal"],
+                   help="Weight scheme: 'nash' for Nash bargaining, 'equal' for uniform weights (ablation baseline)")
     return p.parse_args()
 
 
@@ -85,6 +88,8 @@ def load_agents(agents_dir, agent_ids, base_model, agent_paths=None):
             base_model, torch_dtype=torch.bfloat16,
             device_map="auto", trust_remote_code=True,
         )
+        if len(tokenizer) > model.config.vocab_size:
+            model.resize_token_embeddings(len(tokenizer))
         try:
             model = PeftModel.from_pretrained(model, apath)
         except Exception as e:
@@ -110,7 +115,7 @@ def run_self_play_round(models, tokenizers, agent_roles, prompts, cfg):
     sp_cfg = cfg.get("self_play", {})
     candidates = generate_candidates(
         models, tokenizers, agent_roles, prompts,
-        max_new_tokens=512,
+        max_new_tokens=256,
         temperature=sp_cfg.get("cross_eval_temperature", 0.7),
     )
     evaluations = cross_evaluate(candidates, agent_roles)
@@ -142,6 +147,8 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
     model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype=torch.bfloat16, trust_remote_code=True,
     )
+    if len(tokenizer) > model.config.vocab_size:
+        model.resize_token_embeddings(len(tokenizer))
     try:
         model = PeftModel.from_pretrained(model, agent_ckpt)
         model = model.merge_and_unload()

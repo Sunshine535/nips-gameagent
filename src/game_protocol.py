@@ -118,7 +118,20 @@ REWARD_FUNCTIONS = {
 
 
 def compute_agent_reward(response: str, reward_weights: dict,
-                         reference: Optional[str] = None) -> float:
+                         reference: Optional[str] = None,
+                         use_robust: bool = True) -> float:
+    if use_robust:
+        try:
+            from src.reward_models import compute_robust_reward
+            return compute_robust_reward(response, reward_weights, reference)
+        except (ImportError, Exception):
+            pass
+        try:
+            from reward_models import compute_robust_reward
+            return compute_robust_reward(response, reward_weights, reference)
+        except (ImportError, Exception):
+            pass
+
     total_reward = 0.0
     total_weight = sum(reward_weights.values())
     for reward_name, weight in reward_weights.items():
@@ -141,7 +154,7 @@ def generate_candidates(
     tokenizers: dict[str, AutoTokenizer],
     agents: dict[str, AgentRole],
     prompts: list[str],
-    max_new_tokens: int = 512,
+    max_new_tokens: int = 256,
     temperature: float = 0.7,
 ) -> list[list[GameCandidate]]:
     all_candidates = []
@@ -220,6 +233,34 @@ def aggregate_preferences(
                         margin=margin,
                     ))
     return pairs
+
+
+def majority_vote_select(
+    agent_responses: dict[str, list[str]],
+    agent_roles: dict[str, AgentRole],
+) -> list[str]:
+    """Select best response per prompt via multi-agent cross-evaluation voting.
+
+    Each agent scores every candidate using its own reward weights, then the
+    candidate with the highest total score across all evaluator agents wins.
+    """
+    num_prompts = len(next(iter(agent_responses.values())))
+    selected = []
+
+    for i in range(num_prompts):
+        best_response, best_score = "", -float("inf")
+        for agent_id in agent_responses:
+            response = agent_responses[agent_id][i]
+            total = sum(
+                compute_agent_reward(response, role.reward_weights)
+                for role in agent_roles.values()
+            )
+            if total > best_score:
+                best_score = total
+                best_response = response
+        selected.append(best_response)
+
+    return selected
 
 
 def compute_elo_ratings(evaluations: list[CrossEvaluation],

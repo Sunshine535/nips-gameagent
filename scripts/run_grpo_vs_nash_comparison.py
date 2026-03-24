@@ -48,6 +48,8 @@ def load_model(path, base_model):
         base_model, torch_dtype=torch.bfloat16,
         device_map="auto", trust_remote_code=True,
     )
+    if len(tokenizer) > model.config.vocab_size:
+        model.resize_token_embeddings(len(tokenizer))
     if os.path.exists(os.path.join(path, "adapter_config.json")):
         model = PeftModel.from_pretrained(model, path)
     model.eval()
