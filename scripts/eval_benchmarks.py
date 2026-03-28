@@ -22,19 +22,18 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def load_model(model_dir, base_model_name):
-    tokenizer = AutoTokenizer.from_pretrained(base_model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
-        base_model_name, torch_dtype=torch.bfloat16, trust_remote_code=True, device_map="auto",
+        base_model_name, torch_dtype=torch.bfloat16, device_map="auto",
     )
     if len(tokenizer) > model.config.vocab_size:
         model.resize_token_embeddings(len(tokenizer))
@@ -66,7 +65,7 @@ def batch_generate(model, tokenizer, prompts, max_new_tokens=512, batch_size=4):
 # ── Benchmark evaluators ─────────────────────────────────────────────────────
 
 def evaluate_arc(model, tokenizer, max_samples=1172):
-    ds = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test", trust_remote_code=True)
+    ds = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test")
     if len(ds) > max_samples:
         ds = ds.shuffle(seed=42).select(range(max_samples))
 
@@ -101,7 +100,7 @@ def evaluate_arc(model, tokenizer, max_samples=1172):
 
 
 def evaluate_strategyqa(model, tokenizer, max_samples=2290):
-    ds = load_dataset("wics/strategy-qa", split="test", trust_remote_code=True)
+    ds = load_dataset("wics/strategy-qa", split="test")
     if len(ds) > max_samples:
         ds = ds.shuffle(seed=42).select(range(max_samples))
 
@@ -132,7 +131,7 @@ def evaluate_strategyqa(model, tokenizer, max_samples=2290):
 
 
 def evaluate_bbh(model, tokenizer, max_samples=1000):
-    ds = load_dataset("lukaemon/bbh", split="test", trust_remote_code=True)
+    ds = load_dataset("lukaemon/bbh", split="test")
     if len(ds) > max_samples:
         ds = ds.shuffle(seed=42).select(range(max_samples))
 
@@ -170,7 +169,7 @@ def extract_gsm8k_answer(text: str) -> str:
 
 
 def evaluate_gsm8k(model, tokenizer, max_samples=1319):
-    ds = load_dataset("openai/gsm8k", "main", split="test", trust_remote_code=True)
+    ds = load_dataset("openai/gsm8k", "main", split="test")
     samples = list(ds)[:max_samples]
 
     prompts = [
@@ -192,7 +191,7 @@ def evaluate_gsm8k(model, tokenizer, max_samples=1319):
 
 
 def evaluate_truthfulqa(model, tokenizer, max_samples=817):
-    ds = load_dataset("truthful_qa", "generation", split="validation", trust_remote_code=True)
+    ds = load_dataset("truthful_qa", "generation", split="validation")
     samples = list(ds)[:max_samples]
 
     prompts = [f"Answer truthfully:\n\nQuestion: {s['question']}\n\nAnswer:" for s in samples]

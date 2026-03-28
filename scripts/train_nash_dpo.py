@@ -2,14 +2,15 @@
 """Nash-DPO training after self-play.
 
 Iterates: self-play -> Nash-DPO -> self-play (configurable iterations).
-Loads self-play preference data, applies NashDPOLoss with multi-agent
-preference scores.
+Supports parallel DPO training across GPUs via --dpo_only subprocess mode.
 """
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,12 +24,11 @@ from trl import DPOConfig, DPOTrainer
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.game_environments_simple import ALL_GAMES
 from src.game_protocol import (
-    AgentRole, generate_candidates, cross_evaluate,
+    AgentRole, PreferencePair, generate_candidates, cross_evaluate,
     aggregate_preferences, compute_elo_ratings,
 )
 from src.nash_dpo import NashDPOLoss, create_nash_dpo_dataset
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -51,8 +51,14 @@ def parse_args():
     p.add_argument("--beta", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--nash_weights", type=str, default="nash",
-                   choices=["nash", "equal"],
-                   help="Weight scheme: 'nash' for Nash bargaining, 'equal' for uniform weights (ablation baseline)")
+                   choices=["nash", "equal"])
+    # Subprocess DPO mode
+    p.add_argument("--dpo_only", action="store_true",
+                   help="Run DPO for a single agent (called by subprocess)")
+    p.add_argument("--dpo_agent", type=str)
+    p.add_argument("--pairs_file", type=str)
+    p.add_argument("--agent_ckpt", type=str)
+    p.add_argument("--iteration", type=int, default=0)
     return p.parse_args()
 
 
@@ -60,6 +66,28 @@ def load_cfg(path):
     with open(path) as f:
         return yaml.safe_load(f)
 
+
+# ── Serialization ─────────────────────────────────────────────────────────
+
+def save_pairs(pairs, filepath):
+    os.makedirs(os.path.dirname(filepath) or ".", exist_ok=True)
+    with open(filepath, "w") as f:
+        for p in pairs:
+            f.write(json.dumps(dataclasses.asdict(p)) + "\n")
+    logger.info("Saved %d pairs -> %s", len(pairs), filepath)
+
+
+def load_pairs(filepath):
+    pairs = []
+    with open(filepath) as f:
+        for line in f:
+            if line.strip():
+                pairs.append(PreferencePair(**json.loads(line)))
+    logger.info("Loaded %d pairs <- %s", len(pairs), filepath)
+    return pairs
+
+
+# ── Agent Management ──────────────────────────────────────────────────────
 
 def build_agent_roles(cfg):
     agents = {}
@@ -146,6 +174,7 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
 
     model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype=torch.bfloat16, trust_remote_code=True,
+        device_map={"": 0},
     )
     if len(tokenizer) > model.config.vocab_size:
         model.resize_token_embeddings(len(tokenizer))
@@ -154,6 +183,9 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
         model = model.merge_and_unload()
     except Exception:
         pass
+
+    if not hasattr(model, "hf_device_map"):
+        model.hf_device_map = {"": 0}
 
     iter_dir = os.path.join(output_dir, f"iter{iteration}", agent_id)
     os.makedirs(iter_dir, exist_ok=True)
@@ -170,7 +202,7 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
         gradient_accumulation_steps=4,
         num_train_epochs=args.dpo_epochs,
         learning_rate=args.dpo_lr,
-        warmup_ratio=0.1,
+        warmup_steps=50,
         bf16=True,
         beta=args.beta,
         logging_steps=10,
@@ -197,8 +229,79 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
     return iter_dir
 
 
+def run_parallel_dpo(pairs, agent_ids, current_paths, args, iteration, num_gpus=4):
+    """Launch DPO for each agent as a subprocess on a separate GPU.
+
+    Batches agents when there are more agents than GPUs to avoid OOM.
+    """
+    pairs_dir = os.path.join(args.output_dir, f"iter{iteration}_pairs")
+    os.makedirs(pairs_dir, exist_ok=True)
+
+    agent_pairs_files = {}
+    for aid in agent_ids:
+        agent_pairs = [p for p in pairs
+                       if p.chosen_agent == aid or p.rejected_agent == aid]
+        pf = os.path.join(pairs_dir, f"{aid}.jsonl")
+        save_pairs(agent_pairs, pf)
+        agent_pairs_files[aid] = pf
+
+    failed = []
+    for batch_start in range(0, len(agent_ids), num_gpus):
+        batch = agent_ids[batch_start:batch_start + num_gpus]
+        processes = []
+        for gpu_id, aid in enumerate(batch):
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+            cmd = [
+                sys.executable, os.path.abspath(__file__),
+                "--dpo_only",
+                "--dpo_agent", aid,
+                "--pairs_file", agent_pairs_files[aid],
+                "--agent_ckpt", current_paths[aid],
+                "--config", args.config,
+                "--output_dir", args.output_dir,
+                "--iteration", str(iteration),
+                "--beta", str(args.beta),
+                "--dpo_epochs", str(args.dpo_epochs),
+                "--dpo_batch_size", str(args.dpo_batch_size),
+                "--dpo_lr", str(args.dpo_lr),
+                "--seed", str(args.seed),
+                "--nash_weights", args.nash_weights,
+            ]
+            logger.info("Launching DPO for %s on GPU %d", aid, gpu_id)
+            p = subprocess.Popen(cmd, env=env)
+            processes.append((aid, p))
+
+        for aid, p in processes:
+            p.wait()
+            if p.returncode != 0:
+                logger.error("DPO for %s failed (exit %d)", aid, p.returncode)
+                failed.append(aid)
+            else:
+                logger.info("DPO for %s completed OK", aid)
+
+    if failed:
+        raise RuntimeError(f"DPO failed for agents: {failed}")
+
+    return {aid: os.path.join(args.output_dir, f"iter{iteration}", aid)
+            for aid in agent_ids}
+
+
 def main():
     args = parse_args()
+
+    # ── Subprocess DPO-only mode ──────────────────────────────────────────
+    if args.dpo_only:
+        cfg = load_cfg(args.config)
+        base_model = cfg["model"]["base"]
+        pairs = load_pairs(args.pairs_file)
+        run_nash_dpo_update(
+            pairs, base_model, args.dpo_agent, args.agent_ckpt,
+            args.output_dir, args, args.iteration,
+        )
+        return
+
+    # ── Normal iterative flow ─────────────────────────────────────────────
     cfg = load_cfg(args.config)
     os.makedirs(args.output_dir, exist_ok=True)
     torch.manual_seed(args.seed)
@@ -206,6 +309,7 @@ def main():
     base_model = cfg["model"]["base"]
     agent_roles = build_agent_roles(cfg)
     agent_ids = list(agent_roles.keys())
+    num_gpus = torch.cuda.device_count()
 
     current_paths = {aid: os.path.join(args.agents_dir, aid) for aid in agent_ids}
     all_stats = []
@@ -215,29 +319,48 @@ def main():
         logger.info("ITERATION %d / %d", iteration + 1, args.num_iterations)
         logger.info("=" * 70)
 
-        models, tokenizers = load_agents(
-            args.agents_dir, agent_ids, base_model, current_paths,
-        )
+        all_pairs_file = os.path.join(args.output_dir, f"iter{iteration}_all_pairs.jsonl")
+        elo_file = os.path.join(args.output_dir, f"iter{iteration}_elo.json")
 
-        prompts = generate_game_prompts(args.games_per_iter)
-        logger.info("Self-play with %d prompts", len(prompts))
-        pairs, elo, _ = run_self_play_round(
-            models, tokenizers, agent_roles, prompts, cfg,
-        )
-        logger.info("Generated %d preference pairs", len(pairs))
-        logger.info("Elo ratings: %s", elo)
-
-        del models
-        torch.cuda.empty_cache()
-
-        for aid in agent_ids:
-            agent_pairs = [p for p in pairs
-                           if p.chosen_agent == aid or p.rejected_agent == aid]
-            new_path = run_nash_dpo_update(
-                agent_pairs, base_model, aid, current_paths[aid],
-                args.output_dir, args, iteration,
+        if os.path.exists(all_pairs_file) and os.path.exists(elo_file):
+            logger.info("Resuming from cached pairs: %s", all_pairs_file)
+            pairs = load_pairs(all_pairs_file)
+            with open(elo_file) as f:
+                elo = json.load(f)
+        else:
+            models, tokenizers = load_agents(
+                args.agents_dir, agent_ids, base_model, current_paths,
             )
-            current_paths[aid] = new_path
+            prompts = generate_game_prompts(args.games_per_iter)
+            logger.info("Self-play with %d prompts", len(prompts))
+            pairs, elo, _ = run_self_play_round(
+                models, tokenizers, agent_roles, prompts, cfg,
+            )
+            logger.info("Generated %d preference pairs", len(pairs))
+            logger.info("Elo ratings: %s", elo)
+
+            save_pairs(pairs, all_pairs_file)
+            with open(elo_file, "w") as f:
+                json.dump(elo, f)
+
+            del models
+            torch.cuda.empty_cache()
+
+        # Check if DPO already completed for this iteration
+        iter_done = all(
+            os.path.isdir(os.path.join(args.output_dir, f"iter{iteration}", aid))
+            and os.path.exists(os.path.join(args.output_dir, f"iter{iteration}", aid, "adapter_config.json"))
+            for aid in agent_ids
+        )
+        if iter_done:
+            logger.info("Iteration %d DPO already complete, skipping", iteration)
+            for aid in agent_ids:
+                current_paths[aid] = os.path.join(args.output_dir, f"iter{iteration}", aid)
+        else:
+            new_paths = run_parallel_dpo(
+                pairs, agent_ids, current_paths, args, iteration, num_gpus,
+            )
+            current_paths.update(new_paths)
 
         iter_stats = {
             "iteration": iteration,

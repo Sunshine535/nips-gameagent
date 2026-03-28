@@ -40,7 +40,6 @@ from src.game_environments import create_environment
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 TRAIN_GAMES = ["prisoners_dilemma", "coordination_game", "public_goods", "auction"]
 HELDOUT_GAMES = ["battle_of_sexes", "stag_hunt", "ultimatum", "negotiation"]

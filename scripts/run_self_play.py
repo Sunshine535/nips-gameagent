@@ -230,7 +230,6 @@ def main():
     args = parse_args()
     cfg = load_config(args.config)
 
-    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
     sp_cfg = cfg["self_play"]
     agents_dir = args.agents_dir or cfg["output"]["agents_dir"]

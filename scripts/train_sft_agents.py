@@ -23,7 +23,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.game_environments_simple import list_games
 from src.game_protocol import compute_agent_reward
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 logging.basicConfig(
     level=logging.INFO,

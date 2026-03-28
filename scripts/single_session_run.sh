@@ -39,7 +39,7 @@ python3 -c 'import torch; print("torch OK:", torch.__version__, "cuda:", torch.c
 python3 -c 'import transformers, trl, peft; print("ALL DEPS OK")' 2>&1
 
 echo "=== Step 4: Run pipeline ==="
-export HF_ENDPOINT=https://hf-mirror.com
+# HF_ENDPOINT removed (use default huggingface.co)
 export PYTHONPATH=$P:$PYTHONPATH
 mkdir -p data results logs
 bash scripts/run_all_experiments.sh --quick 2>&1

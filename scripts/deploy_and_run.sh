@@ -55,7 +55,7 @@ if [ "${1:-}" = "--quick" ]; then
     echo "$(date) - Quick mode enabled" | tee -a "$LOG"
 fi
 
-export HF_ENDPOINT=https://hf-mirror.com
+# HF_ENDPOINT removed (use default huggingface.co)
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 
 nohup bash scripts/run_all_experiments.sh $QUICK_FLAG > logs/full_pipeline_$(date +%Y%m%d_%H%M%S).log 2>&1 &

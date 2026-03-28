@@ -28,7 +28,6 @@ from src.game_environments import create_environment
 from src.game_environments_simple import ALL_GAMES
 from src.game_protocol import compute_agent_reward, AgentRole
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 

@@ -54,7 +54,7 @@ mkdir -p data results logs
 
 setup_env 2>&1 | tee logs/bootstrap_env.log
 
-export HF_ENDPOINT=https://hf-mirror.com
+# HF_ENDPOINT removed (use default huggingface.co)
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export PYTHONPATH="$PROJ:$PYTHONPATH"
 

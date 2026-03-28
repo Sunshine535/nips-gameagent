@@ -1,49 +1,40 @@
 #!/usr/bin/env python3
-"""Complete self-play + GRPO training loop.
+"""GRPO self-play — multiprocessing across GPUs for maximum throughput.
 
-Load SFT-warmed agents, then for each GRPO iteration:
-  1. Generate 10K self-play episodes across all 8 games
-  2. Compute rewards (payoff + strategy quality + Nash proximity)
-  3. Run GRPO policy update on each agent
-  4. Evaluate all agents on all games
-
-Tracks: avg payoff per game, strategy diversity (action entropy), Nash distance.
+Each GPU runs in its own *process*, so Triton auto-tuning is completely
+independent and there is zero lock contention.  Batch size can be pushed
+to 128+ since each H800 has 80 GB.
 
 Usage:
-    python scripts/run_grpo_self_play.py --sft_dir results/sft_agents
-    torchrun --nproc_per_node=4 scripts/run_grpo_self_play.py ...
+    python scripts/run_grpo_self_play.py --batch_size 128
 """
 
-import argparse
-import json
-import logging
-import math
-import os
-import random
-import sys
+import argparse, json, logging, math, os, random, sys, time
 from collections import Counter, defaultdict
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+import torch.multiprocessing as mp
 import yaml
 from peft import PeftModel
-from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.game_environments import create_environment
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
-AGENT_GAME_ASSIGNMENTS = {
-    "agent_0": ["prisoners_dilemma", "coordination_game"],
-    "agent_1": ["battle_of_sexes", "stag_hunt"],
-    "agent_2": ["public_goods", "auction"],
-    "agent_3": ["ultimatum", "negotiation"],
+GPU_GAME_MAP = {
+    0: ["auction", "negotiation"],
+    1: ["ultimatum", "matching_pennies"],
+    2: ["public_goods", "prisoners_dilemma"],
+    3: ["battle_of_sexes", "stag_hunt", "coordination_game", "chicken"],
 }
 
 NASH_EQUILIBRIA = {
@@ -54,299 +45,358 @@ NASH_EQUILIBRIA = {
     "public_goods": {"contribute": 0.5, "free_ride": 0.5},
     "ultimatum": {"accept": 0.7, "reject": 0.3},
     "auction": {},
-    "negotiation": {"agree": 0.6, "propose_medium": 0.2, "propose_low": 0.1, "propose_high": 0.1},
+    "negotiation": {"agree": 0.6, "propose_medium": 0.2,
+                    "propose_low": 0.1, "propose_high": 0.1},
 }
 
+# ── helpers ──────────────────────────────────────────────────────────
 
-def format_decision_prompt(game_prompt: str, action_space: list) -> str:
+def fmt_prompt(game_prompt: str, actions: list) -> str:
     return (
-        f"<|im_start|>system\nYou are a strategic decision-making agent. "
-        f"Analyze the situation carefully and choose the optimal action. "
-        f"Consider both immediate and long-term consequences.<|im_end|>\n"
+        "<|im_start|>system\nYou are a strategic decision-making agent. "
+        "Analyze the situation carefully and choose the optimal action. "
+        "Consider both immediate and long-term consequences.<|im_end|>\n"
         f"<|im_start|>user\n{game_prompt}\n\n"
-        f"Choose exactly ONE action from: {', '.join(action_space)}\n"
-        f"Format: ACTION: <your_choice>\nREASONING: <brief explanation><|im_end|>\n"
-        f"<|im_start|>assistant\n"
+        f"Choose exactly ONE action from: {', '.join(actions)}\n"
+        "Format: ACTION: <your_choice>\nREASONING: <brief explanation>"
+        "<|im_end|>\n<|im_start|>assistant\n"
     )
 
+def parse_action(resp: str, valid: list) -> str:
+    lo = resp.lower()
+    if "action:" in lo:
+        after = lo.split("action:")[-1].strip()
+        for a in valid:
+            if a.lower() in after[:50]:
+                return a
+    for a in valid:
+        if a.lower() in lo:
+            return a
+    return random.choice(valid)
 
-def parse_action(response: str, valid_actions: list) -> str:
-    response_lower = response.lower()
-    if "action:" in response_lower:
-        after_action = response_lower.split("action:")[-1].strip()
-        for action in valid_actions:
-            if action.lower() in after_action[:50]:
-                return action
-    for action in valid_actions:
-        if action.lower() in response_lower:
-            return action
-    return random.choice(valid_actions)
-
-
-def get_player_ids(scenario_name: str, scenario_cfg: dict) -> list:
-    game_type = scenario_cfg.get("type", "")
-    if "n_player" in game_type:
-        return [f"player_{i}" for i in range(scenario_cfg.get("num_players", 4))]
-    elif "sequential" in game_type:
-        return scenario_cfg.get("roles", ["party_A", "party_B"])
+def player_ids(name: str, cfg: dict) -> list:
+    gt = cfg.get("type", "")
+    if "n_player" in gt:
+        return [f"player_{i}" for i in range(cfg.get("num_players", 4))]
+    if "sequential" in gt:
+        return cfg.get("roles", ["party_A", "party_B"])
     return ["player_0", "player_1"]
 
-
-def compute_strategy_diversity(action_counts: dict) -> float:
-    """Shannon entropy of action distribution."""
-    total = sum(action_counts.values())
+def strategy_diversity(counts: dict) -> float:
+    total = sum(counts.values())
     if total == 0:
         return 0.0
-    entropy = 0.0
-    for count in action_counts.values():
-        if count > 0:
-            p = count / total
-            entropy -= p * math.log(p + 1e-10)
-    return entropy
+    return -sum((c / total) * math.log(c / total + 1e-10)
+                for c in counts.values() if c > 0)
 
-
-def compute_nash_distance(action_counts: dict, scenario_name: str) -> float:
-    """L2 distance between empirical action distribution and reference Nash equilibrium."""
-    nash = NASH_EQUILIBRIA.get(scenario_name, {})
+def nash_distance(counts: dict, game: str) -> float:
+    nash = NASH_EQUILIBRIA.get(game, {})
     if not nash:
         return 0.0
-    total = sum(action_counts.values())
+    total = sum(counts.values())
     if total == 0:
         return 0.0
-    empirical = {a: c / total for a, c in action_counts.items()}
-    dist = 0.0
-    all_actions = set(list(nash.keys()) + list(empirical.keys()))
-    for action in all_actions:
-        dist += (empirical.get(action, 0.0) - nash.get(action, 0.0)) ** 2
-    return dist ** 0.5
+    emp = {a: c / total for a, c in counts.items()}
+    return sum((emp.get(a, 0) - nash.get(a, 0)) ** 2
+               for a in set(list(nash) + list(emp))) ** 0.5
 
-
-def load_agent(agent_name: str, sft_dir: str, model_name: str, device):
-    """Load an SFT-warmed LoRA agent."""
-    agent_path = Path(sft_dir) / agent_name / "final"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    base_model = AutoModelForCausalLM.from_pretrained(
+def load_agent(name, sft_dir, model_name, device):
+    path = Path(sft_dir) / name / "final"
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    base = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        device_map={"": device},
+        trust_remote_code=True, device_map={"": device},
     )
-    base_model.config.use_cache = False
-
-    if len(tokenizer) > base_model.config.vocab_size:
-        base_model.resize_token_embeddings(len(tokenizer))
-        logger.info("Resized embeddings: %d -> %d", base_model.config.vocab_size, len(tokenizer))
-
-    if agent_path.exists() and (agent_path / "adapter_config.json").exists():
-        model = PeftModel.from_pretrained(base_model, str(agent_path), is_trainable=True)
-        logger.info("Loaded LoRA adapter from %s", agent_path)
+    base.config.use_cache = True
+    if len(tok) > base.config.vocab_size:
+        base.resize_token_embeddings(len(tok))
+    if path.exists() and (path / "adapter_config.json").exists():
+        mdl = PeftModel.from_pretrained(base, str(path), is_trainable=True)
     else:
         from peft import LoraConfig, TaskType, get_peft_model
-        peft_config = LoraConfig(
+        cfg = LoraConfig(
             r=16, lora_alpha=32, lora_dropout=0.05,
             target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                             "gate_proj", "up_proj", "down_proj"],
-            task_type=TaskType.CAUSAL_LM, bias="none",
-        )
-        model = get_peft_model(base_model, peft_config)
-        logger.warning("No SFT checkpoint at %s, using fresh LoRA", agent_path)
+                            "gate_proj", "up_proj", "down_proj"],
+            task_type=TaskType.CAUSAL_LM, bias="none")
+        mdl = get_peft_model(base, cfg)
+    return mdl, tok
 
-    return model, tokenizer
+# ── batched episode generation ───────────────────────────────────────
 
+def play_batched(model, tok, game, config, n_eps, agent_name,
+                 temp=0.7, bs=128):
+    dev = next(model.parameters()).device
+    sc = config["scenarios"][game]
+    pids = player_ids(game, sc)
+    all_trajs, all_states = [], []
 
-def get_model_device(model):
-    """Get the device a model's parameters are on."""
-    return next(model.parameters()).device
+    for bstart in range(0, n_eps, bs):
+        bsz = min(bs, n_eps - bstart)
+        envs = [create_environment(game, config) for _ in range(bsz)]
+        states = [e.reset() for e in envs]
+        trajs = [{p: [] for p in pids} for _ in range(bsz)]
+        active = list(range(bsz))
 
+        for _rnd in range(15):
+            if not active:
+                break
+            racts = [{} for _ in range(bsz)]
+            for pid in pids:
+                if not active:
+                    break
+                prompts, aspaces = [], []
+                for i in active:
+                    aspaces.append(envs[i].get_action_space(pid))
+                    prompts.append(fmt_prompt(
+                        envs[i].get_prompt(states[i], pid), aspaces[-1]))
 
-def play_self_play_episode(agents, tokenizers, env, player_ids, scenario_name, temperature=0.7):
-    """Play one episode with different agents as players, each on its own device."""
-    state = env.reset()
-    trajectories = {pid: [] for pid in player_ids}
+                tok.padding_side = "left"
+                enc = tok(prompts, return_tensors="pt", padding=True,
+                          truncation=True, max_length=1024).to(dev)
+                try:
+                    with torch.no_grad():
+                        out = model.generate(
+                            **enc, max_new_tokens=80, do_sample=True,
+                            temperature=temp, top_p=0.9,
+                            pad_token_id=tok.pad_token_id,
+                            eos_token_id=tok.eos_token_id)
+                except RuntimeError:
+                    torch.cuda.empty_cache()
+                    for j, idx in enumerate(active):
+                        a = random.choice(aspaces[j])
+                        racts[idx][pid] = a
+                        trajs[idx][pid].append(dict(
+                            prompt=prompts[j], response=f"ACTION: {a}",
+                            action=a, log_prob=-1.0,
+                            round=states[idx].round_num,
+                            agent_name=agent_name))
+                    continue
 
-    agent_names = list(agents.keys())
-    player_to_agent = {}
-    for i, pid in enumerate(player_ids):
-        assigned = [aname for aname, games in AGENT_GAME_ASSIGNMENTS.items() if scenario_name in games]
-        if assigned:
-            player_to_agent[pid] = assigned[i % len(assigned)]
-        else:
-            player_to_agent[pid] = agent_names[i % len(agent_names)]
+                gs = enc["input_ids"].shape[1]
+                for j, idx in enumerate(active):
+                    r = tok.decode(out[j][gs:], skip_special_tokens=True)
+                    a = parse_action(r, aspaces[j])
+                    racts[idx][pid] = a
+                    trajs[idx][pid].append(dict(
+                        prompt=prompts[j], response=r, action=a,
+                        log_prob=-1.0, round=states[idx].round_num,
+                        agent_name=agent_name))
 
-    while not state.done:
-        actions = {}
-        for pid in player_ids:
-            agent_name = player_to_agent[pid]
-            model = agents[agent_name]
-            tokenizer = tokenizers[agent_name]
-            dev = get_model_device(model)
+            new_act = []
+            for i in active:
+                states[i], rew = envs[i].step(racts[i])
+                for pid in pids:
+                    if trajs[i][pid]:
+                        trajs[i][pid][-1]["reward"] = rew.get(pid, 0.0)
+                if not states[i].done:
+                    new_act.append(i)
+            active = new_act
 
-            action_space = env.get_action_space(pid)
-            game_prompt = env.get_prompt(state, pid)
-            prompt = format_decision_prompt(game_prompt, action_space)
+        all_trajs.extend(trajs)
+        all_states.extend(states)
+        torch.cuda.empty_cache()
 
-            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024).to(dev)
-            try:
-                with torch.no_grad():
-                    outputs = model.generate(
-                        **inputs, max_new_tokens=80, do_sample=True,
-                        temperature=temperature, top_p=0.9,
-                        pad_token_id=tokenizer.pad_token_id,
-                        eos_token_id=tokenizer.eos_token_id,
-                    )
-                response = tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-                action = parse_action(response, action_space)
-            except RuntimeError:
-                torch.cuda.empty_cache()
-                action = random.choice(action_space)
-                response = f"ACTION: {action}"
-            actions[pid] = action
-
-            action_text = f"ACTION: {action}"
-            try:
-                action_inputs = tokenizer(
-                    prompt + action_text, return_tensors="pt", truncation=True, max_length=1024
-                ).to(dev)
-                with torch.no_grad():
-                    logits = model(**action_inputs).logits
-                prompt_len = inputs["input_ids"].shape[1]
-                action_logits = logits[0, prompt_len - 1:-1]
-                action_token_ids = action_inputs["input_ids"][0, prompt_len:]
-                log_probs = F.log_softmax(action_logits, dim=-1)
-                token_log_probs = log_probs.gather(1, action_token_ids.unsqueeze(1)).squeeze(1)
-                avg_log_prob = token_log_probs.mean().item()
-            except RuntimeError:
-                torch.cuda.empty_cache()
-                avg_log_prob = -1.0
-
-            trajectories[pid].append({
-                "prompt": prompt,
-                "response": response,
-                "action": action,
-                "log_prob": avg_log_prob,
-                "round": state.round_num,
-                "agent_name": agent_name,
-            })
-
-        state, rewards = env.step(actions)
-        for pid in player_ids:
-            if trajectories[pid]:
-                trajectories[pid][-1]["reward"] = rewards.get(pid, 0.0)
-
-    return trajectories, state
+    return all_trajs, all_states
 
 
-def grpo_update_agent(model, tokenizer, agent_trajectories, optimizer, grpo_cfg):
-    """Apply GRPO update to a single agent using its collected trajectories."""
-    dev = get_model_device(model)
-    clip_range = grpo_cfg["clip_range"]
-    kl_coeff = grpo_cfg["kl_coeff"]
-    gamma = grpo_cfg["gamma"]
+def batch_log_probs(model, tok, trajs, pids, lp_bs=48):
+    dev = next(model.parameters()).device
+    model.eval()
+    items = [(ti, p, si, s)
+             for ti, td in enumerate(trajs)
+             for p in pids for si, s in enumerate(td[p])]
+    if not items:
+        return
+    tok.padding_side = "right"
+    for s in range(0, len(items), lp_bs):
+        batch = items[s:s + lp_bs]
+        ftexts = [it[3]["prompt"] + f"ACTION: {it[3]['action']}" for it in batch]
+        ptexts = [it[3]["prompt"] for it in batch]
+        fenc = tok(ftexts, return_tensors="pt", padding=True,
+                   truncation=True, max_length=1024).to(dev)
+        penc = tok(ptexts, return_tensors="pt", padding=True,
+                   truncation=True, max_length=1024)
+        with torch.no_grad():
+            logits = model(**fenc).logits
+        for j, (ti, pid, si, _) in enumerate(batch):
+            pl = int(penc["attention_mask"][j].sum().item())
+            sl = int(fenc["attention_mask"][j].sum().item())
+            na = sl - pl
+            if na <= 0:
+                continue
+            al = logits[j, pl - 1:sl - 1]
+            ai = fenc["input_ids"][j, pl:sl]
+            lp = F.log_softmax(al, dim=-1)
+            tlp = lp.gather(1, ai.unsqueeze(1)).squeeze(1)
+            trajs[ti][pid][si]["log_prob"] = tlp.mean().item()
+    torch.cuda.empty_cache()
 
-    total_loss = 0.0
-    num_updates = 0
+# ── GRPO update ──────────────────────────────────────────────────────
 
-    for traj in agent_trajectories:
+def grpo_update(model, tok, trajectories, optimizer, cfg, grad_accum=8):
+    dev = next(model.parameters()).device
+    model.config.use_cache = False
+    model.train()
+    clip, kl_c, gamma = cfg["clip_range"], cfg["kl_coeff"], cfg["gamma"]
+    tot_loss, n_up = 0.0, 0
+
+    all_items = []
+    for traj in trajectories:
         if len(traj) < 2:
             continue
-
-        rewards = torch.tensor([t["reward"] for t in traj], device=dev)
-        returns = torch.zeros_like(rewards)
+        rew = torch.tensor([float(t["reward"]) for t in traj],
+                           dtype=torch.float32, device=dev)
+        ret = torch.zeros_like(rew)
         G = 0.0
-        for i in reversed(range(len(rewards))):
-            G = rewards[i] + gamma * G
-            returns[i] = G
+        for i in reversed(range(len(rew))):
+            G = rew[i] + gamma * G
+            ret[i] = G
+        adv = (ret - ret.mean()) / ret.std().clamp(min=1e-8)
+        for sd, a in zip(traj, adv):
+            all_items.append((sd, a.item()))
 
-        mean_r = returns.mean()
-        std_r = returns.std().clamp(min=1e-8)
-        advantages = (returns - mean_r) / std_r
+    random.shuffle(all_items)
+    tok.padding_side = "right"
 
-        for step_data, adv in zip(traj, advantages):
-            prompt = step_data["prompt"]
-            old_log_prob = step_data["log_prob"]
+    for bs in range(0, len(all_items), grad_accum):
+        batch = all_items[bs:bs + grad_accum]
+        texts = [sd["prompt"] + f"ACTION: {sd['action']}" for sd, _ in batch]
+        enc = tok(texts, return_tensors="pt", padding=True,
+                  truncation=True, max_length=1024).to(dev)
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            logits = model(**enc).logits
+            sl = logits[..., :-1, :].contiguous()
+            labs = enc["input_ids"][..., 1:].contiguous()
+            lp = F.log_softmax(sl, dim=-1)
+            tlp = lp.gather(-1, labs.unsqueeze(-1)).squeeze(-1)
+            mask = (labs != tok.pad_token_id).float()
 
-            inputs = tokenizer(
-                prompt + f"ACTION: {step_data['action']}",
-                return_tensors="pt", truncation=True, max_length=1024,
-            ).to(dev)
-            labels = inputs["input_ids"]
+        batch_loss = torch.tensor(0.0, device=dev)
+        for j, (sd, adv_val) in enumerate(batch):
+            nlp_j = (tlp[j] * mask[j]).sum() / mask[j].sum().clamp(min=1)
+            ratio = torch.exp(nlp_j - sd["log_prob"])
+            clip_r = torch.clamp(ratio, 1 - clip, 1 + clip)
+            a_t = torch.tensor(adv_val, device=dev)
+            batch_loss += (-torch.min(ratio * a_t, clip_r * a_t)
+                           + kl_c * (sd["log_prob"] - nlp_j))
 
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
-                outputs = model(**inputs, labels=labels)
-                logits = outputs.logits
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = labels[..., 1:].contiguous()
-                log_probs = F.log_softmax(shift_logits, dim=-1)
-                token_log_probs = log_probs.gather(-1, shift_labels.unsqueeze(-1)).squeeze(-1)
-                mask = (shift_labels != -100).float()
-                new_log_prob = (token_log_probs * mask).sum(-1) / mask.sum(-1).clamp(min=1)
+        (batch_loss / len(batch)).backward()
+        tot_loss += batch_loss.item()
+        n_up += len(batch)
 
-            ratio = torch.exp(new_log_prob - old_log_prob)
-            clipped = torch.clamp(ratio, 1 - clip_range, 1 + clip_range)
-            policy_loss = -torch.min(ratio * adv, clipped * adv)
-            kl = kl_coeff * (old_log_prob - new_log_prob)
-            loss = policy_loss + kl
+        if (bs // grad_accum + 1) % 4 == 0 or bs + grad_accum >= len(all_items):
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            optimizer.zero_grad()
 
-            loss.backward()
-            total_loss += loss.item()
-            num_updates += 1
+    model.config.use_cache = True
+    return {"loss": tot_loss / max(n_up, 1), "num_updates": n_up}
 
-    if num_updates > 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        optimizer.zero_grad()
+# ── per-GPU worker process ──────────────────────────────────────────
 
-    return {"loss": total_loss / max(num_updates, 1), "num_updates": num_updates}
+def gpu_worker(rank, args_ns, config, iter_dir_str, sft_or_ckpt_dir):
+    """Runs entirely inside its own process — full GPU isolation."""
+    torch.cuda.set_device(rank)
+    device = torch.device(f"cuda:{rank}")
+    agent_name = f"agent_{rank}"
 
-
-def evaluate_agents(agents, tokenizers, config, num_episodes=20):
-    """Evaluate all agents across all games."""
-    results = {}
     scenario_names = list(config["scenarios"].keys())
+    games = [g for g in GPU_GAME_MAP.get(rank, []) if g in scenario_names]
+    if not games:
+        return
 
-    for scenario_name in scenario_names:
-        scenario_cfg = config["scenarios"][scenario_name]
-        player_ids = get_player_ids(scenario_name, scenario_cfg)
-        action_counts = Counter()
-        total_payoffs = defaultdict(float)
+    log = logging.getLogger(f"GPU{rank}")
+    log.info("Loading model on %s for games %s", device, games)
+    model, tok = load_agent(agent_name, sft_or_ckpt_dir,
+                            config["model"]["base_model"], device)
+    model.eval()
 
-        for _ in range(num_episodes):
-            env = create_environment(scenario_name, config)
-            _, final_state = play_self_play_episode(
-                agents, tokenizers, env, player_ids, scenario_name, temperature=0.3,
-            )
-            for pid in player_ids:
-                total_payoffs[pid] += final_state.scores.get(pid, 0.0)
-            for h in final_state.history:
-                for pid, action in h.get("actions", {}).items():
-                    action_counts[action] += 1
+    eps_per_game = args_ns.episodes_per_iter // len(scenario_names)
+    all_trajs = []
+    payoffs = {}
 
-        avg_payoffs = {pid: v / num_episodes for pid, v in total_payoffs.items()}
-        diversity = compute_strategy_diversity(dict(action_counts))
-        nash_dist = compute_nash_distance(dict(action_counts), scenario_name)
+    for gn in games:
+        pids = player_ids(gn, config["scenarios"][gn])
+        t0 = time.time()
+        trajs, states = play_batched(
+            model, tok, gn, config, eps_per_game,
+            agent_name, args_ns.temperature, args_ns.batch_size)
+        gen_s = time.time() - t0
 
-        results[scenario_name] = {
-            "avg_payoffs": avg_payoffs,
-            "strategy_diversity": diversity,
-            "nash_distance": nash_dist,
-            "action_distribution": dict(action_counts),
+        t0 = time.time()
+        batch_log_probs(model, tok, trajs, pids)
+        lp_s = time.time() - t0
+
+        for td in trajs:
+            for p in pids:
+                if td[p]:
+                    all_trajs.append(td[p])
+        payoffs[gn] = [sum(s.scores.values()) for s in states]
+        log.info("%s: %d eps in %.1fs (gen=%.1fs lp=%.1fs)",
+                 gn, len(trajs), gen_s + lp_s, gen_s, lp_s)
+
+    iter_dir = Path(iter_dir_str)
+    with open(iter_dir / f"{agent_name}_trajs.json", "w") as f:
+        json.dump(all_trajs, f)
+    with open(iter_dir / f"{agent_name}_payoffs.json", "w") as f:
+        json.dump(payoffs, f)
+
+    log.info("GRPO update (%d trajectory sets)...", len(all_trajs))
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=args_ns.learning_rate)
+    stats = grpo_update(model, tok, all_trajs, optimizer, config["grpo"])
+    log.info("GRPO done: loss=%.4f updates=%d", stats["loss"], stats["num_updates"])
+
+    ckpt = iter_dir / agent_name
+    model.save_pretrained(str(ckpt))
+    tok.save_pretrained(str(ckpt))
+
+    log.info("Eval (%d eps)...", args_ns.eval_episodes)
+    model.eval()
+    eval_res = {}
+    for gn in games:
+        pids_g = player_ids(gn, config["scenarios"][gn])
+        ac = Counter()
+        tp = defaultdict(float)
+        et, es = play_batched(model, tok, gn, config,
+                              args_ns.eval_episodes, agent_name,
+                              temp=0.3, bs=args_ns.batch_size)
+        for fs in es:
+            for p in pids_g:
+                tp[p] += fs.scores.get(p, 0.0)
+            for h in fs.history:
+                for _, act in h.get("actions", {}).items():
+                    ac[act] += 1
+        ne = max(args_ns.eval_episodes, 1)
+        eval_res[gn] = {
+            "avg_payoffs": {p: v / ne for p, v in tp.items()},
+            "strategy_diversity": strategy_diversity(dict(ac)),
+            "nash_distance": nash_distance(dict(ac), gn),
+            "action_distribution": dict(ac),
         }
+    with open(iter_dir / f"{agent_name}_eval.json", "w") as f:
+        json.dump(eval_res, f, indent=2, default=str)
 
-    return results
+    log.info("Done ✓")
 
+
+# ── main ─────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="GRPO self-play training loop")
-    parser.add_argument("--config", type=str, default="configs/game_scenarios.yaml")
-    parser.add_argument("--sft_dir", type=str, default="results/sft_agents")
-    parser.add_argument("--output_dir", type=str, default="results/grpo_self_play")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/game_scenarios.yaml")
+    parser.add_argument("--sft_dir", default="results/sft_agents")
+    parser.add_argument("--output_dir", default="results/grpo_self_play")
     parser.add_argument("--num_iterations", type=int, default=5)
     parser.add_argument("--episodes_per_iter", type=int, default=10000)
     parser.add_argument("--eval_episodes", type=int, default=20)
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--temperature", type=float, default=0.7)
+    parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -356,123 +406,74 @@ def main():
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
+    out = Path(args.output_dir)
+    out.mkdir(parents=True, exist_ok=True)
     num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 1
-    model_name = config["model"]["base_model"]
-    grpo_cfg = config["grpo"]
-    scenario_names = list(config["scenarios"].keys())
-    episodes_per_game = args.episodes_per_iter // len(scenario_names)
 
-    logger.info("=== GRPO Self-Play Training ===")
-    logger.info("Iterations: %d, Episodes/iter: %d, Games: %d, GPUs: %d",
-                args.num_iterations, args.episodes_per_iter, len(scenario_names), num_gpus)
+    logger.info("=== GRPO Self-Play (multiprocessing, batch=%d) ===", args.batch_size)
+    logger.info("GPUs=%d, Iters=%d, Eps/iter=%d", num_gpus, args.num_iterations,
+                args.episodes_per_iter)
 
-    agents = {}
-    tokenizers = {}
-    optimizers = {}
-
-    agent_names_list = list(AGENT_GAME_ASSIGNMENTS.keys())
-    for i, agent_name in enumerate(agent_names_list):
-        agent_device = torch.device(f"cuda:{i % num_gpus}" if num_gpus > 0 else "cpu")
-        model, tokenizer = load_agent(agent_name, args.sft_dir, model_name, agent_device)
-        agents[agent_name] = model
-        tokenizers[agent_name] = tokenizer
-        optimizers[agent_name] = torch.optim.AdamW(
-            [p for p in model.parameters() if p.requires_grad],
-            lr=args.learning_rate,
-        )
-        logger.info("  %s -> %s", agent_name, agent_device)
-
+    mp.set_start_method("spawn", force=True)
     training_log = []
+    sft_dir = args.sft_dir
 
     for iteration in range(args.num_iterations):
         logger.info("=== Iteration %d/%d ===", iteration + 1, args.num_iterations)
-        iter_dir = output_dir / f"iter_{iteration}"
+        iter_dir = out / f"iter_{iteration}"
         iter_dir.mkdir(parents=True, exist_ok=True)
 
-        agent_trajectories = {name: [] for name in agents}
-        iter_payoffs = defaultdict(list)
+        processes = []
+        for rank in range(num_gpus):
+            p = mp.Process(target=gpu_worker,
+                           args=(rank, args, config, str(iter_dir), sft_dir))
+            p.start()
+            processes.append(p)
 
-        for scenario_name in scenario_names:
-            logger.info("  Generating self-play episodes for %s...", scenario_name)
-            scenario_cfg = config["scenarios"][scenario_name]
-            player_ids = get_player_ids(scenario_name, scenario_cfg)
+        for p in processes:
+            p.join()
 
-            for ep_idx in tqdm(range(episodes_per_game), desc=scenario_name, leave=False):
-                env = create_environment(scenario_name, config)
-                trajectories, final_state = play_self_play_episode(
-                    agents, tokenizers, env, player_ids, scenario_name,
-                    args.temperature,
-                )
+        failed = [i for i, p in enumerate(processes) if p.exitcode != 0]
+        if failed:
+            logger.error("GPUs %s failed!", failed)
 
-                for pid, traj in trajectories.items():
-                    agent_name = traj[0]["agent_name"] if traj else None
-                    if agent_name and agent_name in agent_trajectories:
-                        agent_trajectories[agent_name].append(traj)
+        iter_log = {"iteration": iteration, "payoffs": {}, "eval": {}}
+        for rank in range(num_gpus):
+            an = f"agent_{rank}"
+            pf = iter_dir / f"{an}_payoffs.json"
+            ef = iter_dir / f"{an}_eval.json"
+            if pf.exists():
+                with open(pf) as f:
+                    iter_log["payoffs"].update(json.load(f))
+            if ef.exists():
+                with open(ef) as f:
+                    iter_log["eval"].update(json.load(f))
 
-                total_payoff = sum(final_state.scores.values())
-                iter_payoffs[scenario_name].append(total_payoff)
-
-                if (ep_idx + 1) % 50 == 0:
-                    torch.cuda.empty_cache()
-
-        logger.info("  Running GRPO updates...")
-        update_stats = {}
-        for agent_name, model in agents.items():
-            model.train()
-            stats = grpo_update_agent(
-                model, tokenizers[agent_name],
-                agent_trajectories[agent_name],
-                optimizers[agent_name], grpo_cfg,
-            )
-            update_stats[agent_name] = stats
-            logger.info("    %s: loss=%.4f, updates=%d",
-                         agent_name, stats["loss"], stats["num_updates"])
-
-        logger.info("  Evaluating agents...")
-        eval_results = evaluate_agents(
-            agents, tokenizers, config, args.eval_episodes,
-        )
-
-        iter_log = {
-            "iteration": iteration,
-            "avg_payoffs_per_game": {
-                g: sum(p) / len(p) for g, p in iter_payoffs.items()
-            },
-            "update_stats": update_stats,
-            "eval_results": eval_results,
-        }
         training_log.append(iter_log)
-
         with open(iter_dir / "iter_results.json", "w") as f:
             json.dump(iter_log, f, indent=2, default=str)
 
-        for agent_name, model in agents.items():
-            ckpt_path = iter_dir / agent_name
-            model.save_pretrained(str(ckpt_path))
-            tokenizers[agent_name].save_pretrained(str(ckpt_path))
+        sft_dir = str(iter_dir)
 
-        logger.info("  Iteration %d summary:", iteration)
-        for game, payoffs in iter_payoffs.items():
-            avg_p = sum(payoffs) / len(payoffs)
-            div = eval_results.get(game, {}).get("strategy_diversity", 0)
-            nash = eval_results.get(game, {}).get("nash_distance", 0)
-            logger.info("    %s: avg_payoff=%.2f, diversity=%.3f, nash_dist=%.3f",
-                         game, avg_p, div, nash)
+        for gn, pays in iter_log["payoffs"].items():
+            ev = iter_log["eval"].get(gn, {})
+            logger.info("  %s: payoff=%.2f div=%.3f nash=%.3f",
+                        gn, sum(pays) / max(len(pays), 1),
+                        ev.get("strategy_diversity", 0),
+                        ev.get("nash_distance", 0))
 
-    for agent_name, model in agents.items():
-        final_path = output_dir / "final" / agent_name
-        model.save_pretrained(str(final_path))
-        tokenizers[agent_name].save_pretrained(str(final_path))
+    for rank in range(num_gpus):
+        an = f"agent_{rank}"
+        src = out / f"iter_{args.num_iterations - 1}" / an
+        dst = out / "final" / an
+        dst.mkdir(parents=True, exist_ok=True)
+        if src.exists():
+            for fn in src.iterdir():
+                (dst / fn.name).write_bytes(fn.read_bytes())
 
-    with open(output_dir / "training_log.json", "w") as f:
+    with open(out / "training_log.json", "w") as f:
         json.dump(training_log, f, indent=2, default=str)
-
-    logger.info("=== GRPO Self-Play Training Complete ===")
-    logger.info("Final models saved to %s/final/", output_dir)
-    logger.info("Training log saved to %s/training_log.json", output_dir)
+    logger.info("=== GRPO Self-Play Complete ===")
 
 
 if __name__ == "__main__":

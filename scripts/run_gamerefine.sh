@@ -21,7 +21,7 @@
 
 set -euo pipefail
 
-export HF_ENDPOINT="https://hf-mirror.com"
+# HF_ENDPOINT removed (use default huggingface.co)
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 export NCCL_P2P_DISABLE=0
 export NCCL_NET_MERGE_LEVEL=LOC

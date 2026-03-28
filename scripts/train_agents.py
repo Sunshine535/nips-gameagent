@@ -30,7 +30,6 @@ from src.game_protocol import (
     AgentRole, REWARD_FUNCTIONS, compute_agent_reward,
 )
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 logging.basicConfig(
     level=logging.INFO,

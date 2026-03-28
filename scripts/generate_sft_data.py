@@ -28,7 +28,6 @@ from src.game_environments import create_environment
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 SYSTEM_PROMPT = (
     "You are a strategic decision-making agent. "

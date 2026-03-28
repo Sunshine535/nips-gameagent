@@ -224,7 +224,6 @@ def main():
     args = parse_args()
     cfg = load_config(args.config)
 
-    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     os.makedirs(args.output_dir, exist_ok=True)
 
     do_gsm = args.eval_gsm8k or args.eval_all

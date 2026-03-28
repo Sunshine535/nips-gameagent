@@ -1,7 +1,7 @@
 model:
   base: "Qwen/Qwen3.5-9B"
   base_model: "Qwen/Qwen3.5-9B"
-  hf_endpoint: "https://hf-mirror.com"
+  hf_endpoint: "https://huggingface.co"
   lora:
     r: 64
     lora_alpha: 128

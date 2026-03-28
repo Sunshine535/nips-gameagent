@@ -17,6 +17,7 @@ LOG_DIR="logs"
 SEED=42
 GRPO_ITERS=3
 GRPO_EPS_PER_ITER=2000
+GRPO_BATCH_SIZE=256
 NASH_EXPERT_EPISODES=500
 NASH_ITERS=2
 NASH_GAMES_PER_ITER=200
@@ -44,6 +45,7 @@ run_timed "A3_grpo_self_play" \
         --num_iterations "$GRPO_ITERS" \
         --episodes_per_iter "$GRPO_EPS_PER_ITER" \
         --eval_episodes "$EVAL_EPISODES" \
+        --batch_size "$GRPO_BATCH_SIZE" \
         --learning_rate 5e-5 \
         --seed "$SEED"
 
@@ -154,6 +156,7 @@ run_timed "D1_ablation_no_sft" \
         --num_iterations "$GRPO_ITERS" \
         --episodes_per_iter $((GRPO_EPS_PER_ITER / 2)) \
         --eval_episodes "$EVAL_EPISODES" \
+        --batch_size "$GRPO_BATCH_SIZE" \
         --seed "$SEED"
 
 run_timed "D2_ablation_fewer_grpo_iters" \
@@ -164,6 +167,7 @@ run_timed "D2_ablation_fewer_grpo_iters" \
         --num_iterations 2 \
         --episodes_per_iter "$GRPO_EPS_PER_ITER" \
         --eval_episodes "$EVAL_EPISODES" \
+        --batch_size "$GRPO_BATCH_SIZE" \
         --seed "$SEED"
 
 run_timed "D3_ablation_fewer_nash_iters" \
