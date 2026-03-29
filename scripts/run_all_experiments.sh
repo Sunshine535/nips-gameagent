@@ -37,6 +37,19 @@ if [ -f "$PROJ_DIR_ROOT/.venv/bin/activate" ]; then
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
+TORCHRUN=$(get_torchrun_cmd)
+
+PHASE_MARKER_DIR="$PROJ_DIR_ROOT/results/.phase_markers"
+mkdir -p "$PHASE_MARKER_DIR"
+FORCE_RERUN="${FORCE_RERUN:-0}"
+
+phase_done() { touch "$PHASE_MARKER_DIR/phase_${1}.done"; echo "[PHASE $1] Completed at $(date)"; }
+is_phase_done() {
+    [[ "$FORCE_RERUN" == "1" ]] && return 1
+    [[ -f "$PHASE_MARKER_DIR/phase_${1}.done" ]] && echo "[PHASE $1] Already completed. Skipping. (FORCE_RERUN=1 to override)" && return 0
+    return 1
+}
+
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PROJECT_DIR"
 
@@ -134,7 +147,7 @@ parallel_generate() {
     fi
 }
 
-if [ "$SKIP_GRPO" = false ]; then
+if [ "$SKIP_GRPO" = false ] && ! is_phase_done 1; then
     log "========== Track A: GRPO Self-Play =========="
 
     run_timed "A1_generate_sft_data" \
@@ -143,7 +156,7 @@ if [ "$SKIP_GRPO" = false ]; then
             --top_fraction 0.3 --seed "$SEED"
 
     run_timed "A2_train_sft_warmup" \
-        python scripts/train_sft_warmup.py \
+        $TORCHRUN scripts/train_sft_warmup.py \
             --config "$GAME_CONFIG" \
             --data_dir "$DATA_DIR" \
             --output_dir "$RESULTS_DIR/sft_agents" \
@@ -171,13 +184,13 @@ if [ "$SKIP_GRPO" = false ]; then
             --num_epochs 2 \
             --eval_episodes "$EVAL_EPISODES" \
             --seed "$SEED"
-fi
+phase_done 1; fi
 
 # ============================================================================
 # Track B: Nash-DPO Self-Play (Multi-Objective Alignment)
 # ============================================================================
 
-if [ "$SKIP_NASH" = false ]; then
+if [ "$SKIP_NASH" = false ] && ! is_phase_done 2; then
     log "========== Track B: Nash-DPO Self-Play =========="
 
     run_timed "B1_generate_expert_data" \
@@ -206,7 +219,7 @@ print(f'Merged: {len(all_ep)} total -> train={len(all_ep)-val_n} val={val_n}')
     fi
 
     run_timed "B2_train_sft_role_agents" \
-        python scripts/train_sft_agents.py \
+        $TORCHRUN scripts/train_sft_agents.py \
             --config "$ROLE_CONFIG" \
             --expert_data "$RESULTS_DIR/expert_data/expert_train.jsonl" \
             --output_dir "$RESULTS_DIR/sft_role_agents" \
@@ -214,7 +227,7 @@ print(f'Merged: {len(all_ep)} total -> train={len(all_ep)-val_n} val={val_n}')
             --seed "$SEED"
 
     run_timed "B3_nash_dpo_self_play" \
-        python scripts/train_nash_dpo.py \
+        $TORCHRUN scripts/train_nash_dpo.py \
             --config "$ROLE_CONFIG" \
             --agents_dir "$RESULTS_DIR/sft_role_agents" \
             --output_dir "$RESULTS_DIR/nash_dpo" \
@@ -223,12 +236,13 @@ print(f'Merged: {len(all_ep)} total -> train={len(all_ep)-val_n} val={val_n}')
             --dpo_epochs 1 \
             --beta 0.1 \
             --seed "$SEED"
-fi
+phase_done 2; fi
 
 # ============================================================================
 # Cross-Comparison & Evaluation
 # ============================================================================
 
+if ! is_phase_done 3; then
 log "========== Cross-Comparison & Evaluation =========="
 
 if [ "$SKIP_GRPO" = false ] && [ "$SKIP_NASH" = false ]; then
@@ -259,11 +273,13 @@ if [ -n "$EVAL_MODELS" ]; then
             --output_dir "$RESULTS_DIR/eval_benchmarks" \
             --benchmarks arc strategyqa bbh gsm8k truthfulqa mt_bench
 fi
+phase_done 3; fi
 
 # ============================================================================
 # Ablation Studies
 # ============================================================================
 
+if ! is_phase_done 4; then
 log "========== Ablation Studies =========="
 
 if [ "$SKIP_GRPO" = false ]; then
@@ -298,6 +314,7 @@ if [ "$SKIP_NASH" = false ]; then
             --games_per_iter "$NASH_GAMES_PER_ITER" \
             --seed "$SEED"
 fi
+phase_done 4; fi
 
 # ============================================================================
 # Summary

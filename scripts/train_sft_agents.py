@@ -6,6 +6,7 @@ in different game subsets using TRL's SFTTrainer.
 """
 
 import argparse
+import glob
 import json
 import logging
 import os
@@ -38,6 +39,12 @@ AGENT_GAME_SUBSETS = {
 }
 
 
+def find_latest_checkpoint(output_dir):
+    ckpts = sorted(glob.glob(os.path.join(output_dir, "checkpoint-*")),
+                   key=lambda x: int(x.split("-")[-1]) if x.split("-")[-1].isdigit() else 0)
+    return ckpts[-1] if ckpts else None
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="SFT training for game agents")
     p.add_argument("--config", type=str, default="configs/agent_roles.yaml")
@@ -53,6 +60,8 @@ def parse_args():
     p.add_argument("--lora_alpha", type=int, default=32)
     p.add_argument("--max_seq_length", type=int, default=1024)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--resume_from_checkpoint", type=str, default="auto",
+                   help="Resume from checkpoint: 'auto', path, or 'none'")
     return p.parse_args()
 
 
@@ -150,7 +159,17 @@ def train_agent(agent_id, game_subset, model_name, expert_path, output_dir,
         peft_config=lora,
     )
 
-    result = trainer.train()
+    resume_ckpt = None
+    resume_opt = train_cfg.get("resume_from_checkpoint", "auto")
+    if resume_opt != "none":
+        if resume_opt == "auto":
+            resume_ckpt = find_latest_checkpoint(output_dir)
+        else:
+            resume_ckpt = resume_opt
+        if resume_ckpt:
+            logger.info(f"Resuming from checkpoint: {resume_ckpt}")
+
+    result = trainer.train(resume_from_checkpoint=resume_ckpt)
     trainer.save_model(output_dir)
     tokenizer.save_pretrained(output_dir)
 
@@ -183,6 +202,7 @@ def main():
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "learning_rate": args.learning_rate,
         "max_seq_length": args.max_seq_length,
+        "resume_from_checkpoint": args.resume_from_checkpoint,
     }
 
     agents = {args.agent: AGENT_GAME_SUBSETS[args.agent]} if args.agent else AGENT_GAME_SUBSETS

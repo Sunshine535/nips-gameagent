@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import glob
 import json
 import logging
 import os
@@ -32,6 +33,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def find_latest_checkpoint(output_dir):
+    ckpts = sorted(glob.glob(os.path.join(output_dir, "checkpoint-*")),
+                   key=lambda x: int(x.split("-")[-1]) if x.split("-")[-1].isdigit() else 0)
+    return ckpts[-1] if ckpts else None
 
 
 AGENT_GAME_ASSIGNMENTS = {
@@ -134,7 +141,16 @@ def train_single_agent(
         peft_config=peft_config,
     )
 
-    trainer.train()
+    resume_ckpt = None
+    if args.resume_from_checkpoint != "none":
+        if args.resume_from_checkpoint == "auto":
+            resume_ckpt = find_latest_checkpoint(str(agent_output))
+        else:
+            resume_ckpt = args.resume_from_checkpoint
+        if resume_ckpt:
+            logger.info(f"Resuming from checkpoint: {resume_ckpt}")
+
+    trainer.train(resume_from_checkpoint=resume_ckpt)
     trainer.save_model(str(agent_output / "final"))
     tokenizer.save_pretrained(str(agent_output / "final"))
 
@@ -174,6 +190,8 @@ def main():
                         help="Train specific agents only (e.g., agent_0 agent_2)")
     parser.add_argument("--parallel", action="store_true",
                         help="Train all agents in parallel (one per GPU)")
+    parser.add_argument("--resume_from_checkpoint", type=str, default="auto",
+                        help="Resume from checkpoint: 'auto', path, or 'none'")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -204,6 +222,7 @@ def main():
                 "--lora_alpha", str(args.lora_alpha),
                 "--max_seq_length", str(args.max_seq_length),
                 "--agents", agent_name,
+                "--resume_from_checkpoint", args.resume_from_checkpoint,
             ]
             logger.info("Launching %s on GPU %d", agent_name, i)
             procs.append(subprocess.Popen(cmd, env=env))

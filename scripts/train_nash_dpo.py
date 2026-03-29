@@ -7,6 +7,7 @@ Supports parallel DPO training across GPUs via --dpo_only subprocess mode.
 
 import argparse
 import dataclasses
+import glob
 import json
 import logging
 import os
@@ -37,6 +38,12 @@ logging.basicConfig(
 logger = logging.getLogger("train_nash_dpo")
 
 
+def find_latest_checkpoint(output_dir):
+    ckpts = sorted(glob.glob(os.path.join(output_dir, "checkpoint-*")),
+                   key=lambda x: int(x.split("-")[-1]) if x.split("-")[-1].isdigit() else 0)
+    return ckpts[-1] if ckpts else None
+
+
 def parse_args():
     p = argparse.ArgumentParser(description="Iterative Nash-DPO training")
     p.add_argument("--config", type=str, default="configs/agent_roles.yaml")
@@ -59,6 +66,8 @@ def parse_args():
     p.add_argument("--pairs_file", type=str)
     p.add_argument("--agent_ckpt", type=str)
     p.add_argument("--iteration", type=int, default=0)
+    p.add_argument("--resume_from_checkpoint", type=str, default="auto",
+                   help="Resume from checkpoint: 'auto', path, or 'none'")
     return p.parse_args()
 
 
@@ -172,9 +181,10 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     model = AutoModelForCausalLM.from_pretrained(
         base_model, torch_dtype=torch.bfloat16, trust_remote_code=True,
-        device_map={"": 0},
+        device_map={"": local_rank},
     )
     if len(tokenizer) > model.config.vocab_size:
         model.resize_token_embeddings(len(tokenizer))
@@ -185,7 +195,7 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
         pass
 
     if not hasattr(model, "hf_device_map"):
-        model.hf_device_map = {"": 0}
+        model.hf_device_map = {"": local_rank}
 
     iter_dir = os.path.join(output_dir, f"iter{iteration}", agent_id)
     os.makedirs(iter_dir, exist_ok=True)
@@ -219,7 +229,16 @@ def run_nash_dpo_update(pairs, base_model, agent_id, agent_ckpt,
         peft_config=lora,
     )
 
-    trainer.train()
+    resume_ckpt = None
+    if args.resume_from_checkpoint != "none":
+        if args.resume_from_checkpoint == "auto":
+            resume_ckpt = find_latest_checkpoint(iter_dir)
+        else:
+            resume_ckpt = args.resume_from_checkpoint
+        if resume_ckpt:
+            logger.info(f"Resuming from checkpoint: {resume_ckpt}")
+
+    trainer.train(resume_from_checkpoint=resume_ckpt)
     trainer.save_model(iter_dir)
     tokenizer.save_pretrained(iter_dir)
     logger.info("Nash-DPO saved to %s", iter_dir)
@@ -267,6 +286,7 @@ def run_parallel_dpo(pairs, agent_ids, current_paths, args, iteration, num_gpus=
                 "--dpo_lr", str(args.dpo_lr),
                 "--seed", str(args.seed),
                 "--nash_weights", args.nash_weights,
+                "--resume_from_checkpoint", args.resume_from_checkpoint,
             ]
             logger.info("Launching DPO for %s on GPU %d", aid, gpu_id)
             p = subprocess.Popen(cmd, env=env)
