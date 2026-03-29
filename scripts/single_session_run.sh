@@ -32,7 +32,7 @@ python3 -c 'import transformers, trl, peft; print("deps OK")' 2>&1 || echo "WARN
 
 echo "=== Step 2: Install deps ==="
 export PATH=$HOME/.local/bin:$PATH
-pip3 install --user torch transformers trl peft datasets accelerate pyyaml scipy matplotlib tqdm pandas huggingface_hub evaluate sentence-transformers 2>&1 || python3 -m pip install --user torch transformers trl peft datasets accelerate pyyaml scipy matplotlib tqdm pandas huggingface_hub evaluate sentence-transformers 2>&1 || echo "WARN: pip install failed"
+pip3 install --user torch transformers "trl>=0.15.0,<0.17.0" peft datasets accelerate pyyaml scipy matplotlib tqdm pandas huggingface_hub evaluate sentence-transformers 2>&1 || python3 -m pip install --user torch transformers "trl>=0.15.0,<0.17.0" peft datasets accelerate pyyaml scipy matplotlib tqdm pandas huggingface_hub evaluate sentence-transformers 2>&1 || echo "WARN: pip install failed"
 
 echo "=== Step 3: Verify ==="
 python3 -c 'import torch; print("torch OK:", torch.__version__, "cuda:", torch.cuda.is_available())' 2>&1

@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
 # ============================================================================
-# GameAgent: Unified Master Experiment Pipeline
+# GameAgent: Factorial Experiment Pipeline
 #
-# Combines two training paradigms:
-#   Track A (GRPO): Strategic decision-making via multi-agent game self-play
-#   Track B (Nash-DPO): Multi-objective alignment via asymmetric agent roles
+# 5-condition factorial design (addressing reviewer W1 + W4):
+#   Condition 1: BASE       — eval base model only
+#   Condition 2: SFT-ONLY   — SFT warmup, no RL
+#   Condition 3: A-ONLY     — SFT + GRPO self-play (Track A)
+#   Condition 4: B-ONLY     — SFT + formal Nash-DPO (Track B)
+#   Condition 5: A+B        — SFT + GRPO → Nash-DPO (combined)
 #
-# Pipeline (default/full mode — --quick uses smaller counts):
-#   1. Generate SFT data (GRPO track: 10 games × 500 episodes)
-#   2. Train 4 SFT warmup agents (GRPO track, LoRA, 2 games each)
-#   3. GRPO self-play (3 iterations, 2K episodes/iter)
-#   4. Cross-game transfer evaluation
-#   5. Generate expert data (Nash-DPO track: 8 simple games × 500 episodes)
-#   6. Train 4 role-specialized SFT agents (Nash-DPO track)
-#   7. Iterative Nash-DPO self-play (2 iterations)
-#   8. GRPO vs Nash-DPO cross-comparison
-#   9. Unified benchmark evaluation (ARC + StrategyQA + BBH + GSM8K + TruthfulQA + MT-Bench)
-#   10. Ablation studies
+# Each condition runs with 3 seeds (42, 123, 456) for statistical validity.
 #
 # Usage:
-#   bash scripts/run_all_experiments.sh
-#   bash scripts/run_all_experiments.sh --skip_grpo     # only Nash-DPO track
-#   bash scripts/run_all_experiments.sh --skip_nash     # only GRPO track
-#   bash scripts/run_all_experiments.sh --quick         # smoke test
+#   bash scripts/run_all_experiments.sh                  # full run
+#   bash scripts/run_all_experiments.sh --quick           # smoke test
+#   bash scripts/run_all_experiments.sh --condition A     # single condition
+#   bash scripts/run_all_experiments.sh --seed 42         # single seed
+#   bash scripts/run_all_experiments.sh --skip_eval       # skip benchmarks
 # ============================================================================
 
 set -euo pipefail
@@ -31,70 +25,72 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/gpu_utils.sh"
 auto_setup
 
-PROJ_DIR_ROOT="$(dirname "$SCRIPT_DIR")"
-if [ -f "$PROJ_DIR_ROOT/.venv/bin/activate" ]; then
-    source "$PROJ_DIR_ROOT/.venv/bin/activate"
+PROJ_DIR="$(dirname "$SCRIPT_DIR")"
+if [ -f "$PROJ_DIR/.venv/bin/activate" ]; then
+    source "$PROJ_DIR/.venv/bin/activate"
 fi
 export PATH="$HOME/.local/bin:$PATH"
-
-TORCHRUN=$(get_torchrun_cmd)
-
-PHASE_MARKER_DIR="$PROJ_DIR_ROOT/results/.phase_markers"
-mkdir -p "$PHASE_MARKER_DIR"
-FORCE_RERUN="${FORCE_RERUN:-0}"
-
-phase_done() { touch "$PHASE_MARKER_DIR/phase_${1}.done"; echo "[PHASE $1] Completed at $(date)"; }
-is_phase_done() {
-    [[ "$FORCE_RERUN" == "1" ]] && return 1
-    [[ -f "$PHASE_MARKER_DIR/phase_${1}.done" ]] && echo "[PHASE $1] Already completed. Skipping. (FORCE_RERUN=1 to override)" && return 0
-    return 1
-}
-
-PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-cd "$PROJECT_DIR"
+cd "$PROJ_DIR"
 
 GAME_CONFIG="configs/game_scenarios.yaml"
 ROLE_CONFIG="configs/agent_roles.yaml"
 DATA_DIR="data"
 RESULTS_DIR="results"
 LOG_DIR="logs"
-SEED=42
-SKIP_GRPO=false
-SKIP_NASH=false
+
+SEEDS=(42 123 456)
 QUICK=false
+CONDITION="all"
+SINGLE_SEED=""
+SKIP_EVAL=false
+FORCE_RERUN="${FORCE_RERUN:-0}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --skip_grpo)   SKIP_GRPO=true; shift ;;
-        --skip_nash)   SKIP_NASH=true; shift ;;
         --quick)       QUICK=true; shift ;;
+        --condition)   CONDITION="$2"; shift 2 ;;
+        --seed)        SINGLE_SEED="$2"; shift 2 ;;
+        --skip_eval)   SKIP_EVAL=true; shift ;;
         --gpus)        NUM_GPUS="$2"; shift 2 ;;
-        --seed)        SEED="$2"; shift 2 ;;
         *)             echo "WARNING: Unknown arg: $1 (ignored)"; shift ;;
     esac
 done
 
+if [ -n "$SINGLE_SEED" ]; then
+    SEEDS=("$SINGLE_SEED")
+fi
+
 if [ "$QUICK" = true ]; then
-    GRPO_SFT_EPISODES=100
+    GRPO_SFT_EPISODES=50
     GRPO_ITERS=1
-    GRPO_EPS_PER_ITER=500
-    NASH_EXPERT_EPISODES=100
-    NASH_ITERS=1
-    NASH_GAMES_PER_ITER=50
-    EVAL_EPISODES=5
-    BENCH_SAMPLES=50
+    GRPO_EPS_PER_ITER=200
+    NASH_PREF_PAIRS=100
+    EVAL_EPISODES=3
+    BENCH_SAMPLES=20
+    SEEDS=(42)
+    echo "[QUICK MODE] Reduced params for smoke test"
 else
-    GRPO_SFT_EPISODES=500
+    GRPO_SFT_EPISODES=200
     GRPO_ITERS=3
-    GRPO_EPS_PER_ITER=2000
-    NASH_EXPERT_EPISODES=500
-    NASH_ITERS=2
-    NASH_GAMES_PER_ITER=200
+    GRPO_EPS_PER_ITER=500
+    NASH_PREF_PAIRS=1000
     EVAL_EPISODES=20
-    BENCH_SAMPLES=500
+    BENCH_SAMPLES=200
 fi
 
 mkdir -p "$DATA_DIR" "$RESULTS_DIR" "$LOG_DIR"
+
+MODE_TAG="full"
+if [ "$QUICK" = true ]; then MODE_TAG="quick"; fi
+PHASE_MARKER_DIR="$RESULTS_DIR/.phase_markers_${MODE_TAG}"
+mkdir -p "$PHASE_MARKER_DIR"
+
+phase_done() { touch "$PHASE_MARKER_DIR/phase_${1}.done"; log "PHASE $1 DONE"; }
+is_phase_done() {
+    [[ "$FORCE_RERUN" == "1" ]] && return 1
+    [[ -f "$PHASE_MARKER_DIR/phase_${1}.done" ]] && log "PHASE $1 already done, skipping" && return 0
+    return 1
+}
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 run_timed() {
@@ -106,238 +102,408 @@ run_timed() {
     log "DONE:  $name (${elapsed}s)"
 }
 
+BASE_MODEL=$(python3 -c "
+import yaml
+with open('$GAME_CONFIG') as f:
+    print(yaml.safe_load(f)['model']['base_model'])
+" 2>/dev/null || echo "Qwen/Qwen3.5-9B")
+
+log "============================================="
+log " GameAgent Factorial Pipeline"
+log " Base model:  $BASE_MODEL"
+log " Conditions:  $CONDITION"
+log " Seeds:       ${SEEDS[*]}"
+log " Quick mode:  $QUICK"
+log "============================================="
+
 # ============================================================================
-# Track A: GRPO Self-Play (Strategic Decision-Making)
+# Phase 0: Data Generation (shared across conditions)
 # ============================================================================
 
-parallel_generate() {
-    local script="$1" config="$2" episodes="$3" outdir="$4"
-    shift 4
-    local extra_args=("$@")
+if ! is_phase_done "0_data"; then
+    log "========== Phase 0: Data Generation =========="
 
-    if [ "${NUM_GPUS:-4}" -ge 4 ]; then
-        log "Parallel data generation on ${NUM_GPUS:-4} GPUs"
-        if [ "$script" = "scripts/generate_sft_data.py" ]; then
-            local G0="prisoners_dilemma,coordination_game,battle_of_sexes"
-            local G1="stag_hunt,chicken,matching_pennies"
-            local G2="public_goods,ultimatum"
-            local G3="auction,negotiation"
-        else
-            local G0="prisoners_dilemma,battle_of_sexes"
-            local G1="stag_hunt,chicken"
-            local G2="matching_pennies,public_goods"
-            local G3="ultimatum,coordination"
-        fi
-        CUDA_VISIBLE_DEVICES=0 python "$script" --config "$config" \
-            --episodes_per_game "$episodes" --output_dir "$outdir" \
-            --games "$G0" "${extra_args[@]}" 2>&1 | tee "${LOG_DIR}/${script##*/}_gpu0.log" &
-        CUDA_VISIBLE_DEVICES=1 python "$script" --config "$config" \
-            --episodes_per_game "$episodes" --output_dir "$outdir" \
-            --games "$G1" "${extra_args[@]}" 2>&1 | tee "${LOG_DIR}/${script##*/}_gpu1.log" &
-        CUDA_VISIBLE_DEVICES=2 python "$script" --config "$config" \
-            --episodes_per_game "$episodes" --output_dir "$outdir" \
-            --games "$G2" "${extra_args[@]}" 2>&1 | tee "${LOG_DIR}/${script##*/}_gpu2.log" &
-        CUDA_VISIBLE_DEVICES=3 python "$script" --config "$config" \
-            --episodes_per_game "$episodes" --output_dir "$outdir" \
-            --games "$G3" "${extra_args[@]}" 2>&1 | tee "${LOG_DIR}/${script##*/}_gpu3.log" &
-        wait
-    else
-        python "$script" --config "$config" \
-            --episodes_per_game "$episodes" --output_dir "$outdir" "${extra_args[@]}"
-    fi
+    run_timed "P0_generate_sft_data" \
+        python scripts/generate_sft_data.py \
+            --config "$GAME_CONFIG" \
+            --episodes_per_game "$GRPO_SFT_EPISODES" \
+            --output_dir "$DATA_DIR" \
+            --top_fraction 0.3 --seed 42
+
+    run_timed "P0_generate_preference_data" \
+        python scripts/generate_preference_data.py \
+            --base_model "$BASE_MODEL" \
+            --output_file "$DATA_DIR/preference_pairs.jsonl" \
+            --n_prompts "$NASH_PREF_PAIRS" \
+            --seed 42
+
+    phase_done "0_data"
+fi
+
+# ============================================================================
+# Condition 1: BASE (just evaluation)
+# ============================================================================
+
+run_condition_base() {
+    local seed=$1
+    local tag="base_s${seed}"
+    local outdir="$RESULTS_DIR/$tag"
+
+    if is_phase_done "$tag"; then return; fi
+    log "===== Condition: BASE (seed=$seed) ====="
+    mkdir -p "$outdir"
+
+    run_timed "${tag}_eval_games" \
+        python scripts/eval_game_performance.py \
+            --config "$GAME_CONFIG" \
+            --output_dir "$outdir/game_eval" \
+            --episodes "$EVAL_EPISODES" \
+            --seed "$seed"
+
+    phase_done "$tag"
 }
 
-if [ "$SKIP_GRPO" = false ] && ! is_phase_done 1; then
-    log "========== Track A: GRPO Self-Play =========="
+# ============================================================================
+# Condition 2: SFT-ONLY
+# ============================================================================
 
-    run_timed "A1_generate_sft_data" \
-        parallel_generate scripts/generate_sft_data.py "$GAME_CONFIG" \
-            "$GRPO_SFT_EPISODES" "$DATA_DIR" \
-            --top_fraction 0.3 --seed "$SEED"
+run_condition_sft() {
+    local seed=$1
+    local tag="sft_s${seed}"
+    local outdir="$RESULTS_DIR/$tag"
 
-    run_timed "A2_train_sft_warmup" \
-        $TORCHRUN scripts/train_sft_warmup.py \
+    if is_phase_done "$tag"; then return; fi
+    log "===== Condition: SFT-ONLY (seed=$seed) ====="
+    mkdir -p "$outdir"
+
+    run_timed "${tag}_sft_warmup" \
+        python scripts/train_sft_warmup.py \
             --config "$GAME_CONFIG" \
             --data_dir "$DATA_DIR" \
-            --output_dir "$RESULTS_DIR/sft_agents" \
+            --output_dir "$outdir/sft_agents" \
             --num_epochs 2 \
             --lora_r 16 --lora_alpha 32 \
             --batch_size 4 --gradient_accumulation_steps 4 \
-            --parallel
+            --seed "$seed"
 
-    run_timed "A3_grpo_self_play" \
+    # Evaluate all 4 SFT agents (not just agent_0) for fair comparison
+    SFT_EVAL_MODELS=""
+    for i in 0 1 2 3; do
+        ap="$outdir/sft_agents/agent_${i}/final"
+        if [ -d "$ap" ]; then
+            [ -n "$SFT_EVAL_MODELS" ] && SFT_EVAL_MODELS="$SFT_EVAL_MODELS "
+            SFT_EVAL_MODELS="${SFT_EVAL_MODELS}agent_${i}:${ap}"
+        fi
+    done
+    if [ -n "$SFT_EVAL_MODELS" ]; then
+        run_timed "${tag}_eval_games" \
+            python scripts/eval_game_performance.py \
+                --config "$GAME_CONFIG" \
+                --model_paths $SFT_EVAL_MODELS \
+                --output_dir "$outdir/game_eval" \
+                --episodes_per_game "$EVAL_EPISODES" \
+                --seed "$seed"
+    fi
+
+    phase_done "$tag"
+}
+
+# ============================================================================
+# Condition 3: A-ONLY (GRPO self-play)
+# ============================================================================
+
+run_condition_A() {
+    local seed=$1
+    local tag="A_s${seed}"
+    local outdir="$RESULTS_DIR/$tag"
+
+    if is_phase_done "$tag"; then return; fi
+    log "===== Condition: A-ONLY / GRPO (seed=$seed) ====="
+    mkdir -p "$outdir"
+
+    run_timed "${tag}_sft_warmup" \
+        python scripts/train_sft_warmup.py \
+            --config "$GAME_CONFIG" \
+            --data_dir "$DATA_DIR" \
+            --output_dir "$outdir/sft_agents" \
+            --num_epochs 2 \
+            --lora_r 16 --lora_alpha 32 \
+            --batch_size 4 --gradient_accumulation_steps 4 \
+            --seed "$seed"
+
+    run_timed "${tag}_grpo_self_play" \
         python scripts/run_grpo_self_play.py \
             --config "$GAME_CONFIG" \
-            --sft_dir "$RESULTS_DIR/sft_agents" \
-            --output_dir "$RESULTS_DIR/grpo_self_play" \
+            --sft_dir "$outdir/sft_agents" \
+            --output_dir "$outdir/grpo" \
             --num_iterations "$GRPO_ITERS" \
             --episodes_per_iter "$GRPO_EPS_PER_ITER" \
             --eval_episodes "$EVAL_EPISODES" \
             --learning_rate 5e-5 \
-            --seed "$SEED"
+            --seed "$seed"
 
-    run_timed "A4_cross_game_transfer" \
-        python scripts/run_cross_game_transfer.py \
-            --config "$GAME_CONFIG" \
-            --data_dir "$DATA_DIR" \
-            --output_dir "$RESULTS_DIR/cross_game_transfer" \
-            --num_epochs 2 \
-            --eval_episodes "$EVAL_EPISODES" \
-            --seed "$SEED"
-phase_done 1; fi
-
-# ============================================================================
-# Track B: Nash-DPO Self-Play (Multi-Objective Alignment)
-# ============================================================================
-
-if [ "$SKIP_NASH" = false ] && ! is_phase_done 2; then
-    log "========== Track B: Nash-DPO Self-Play =========="
-
-    run_timed "B1_generate_expert_data" \
-        parallel_generate scripts/generate_expert_data.py "$ROLE_CONFIG" \
-            "$NASH_EXPERT_EPISODES" "$RESULTS_DIR/expert_data" \
-            --top_fraction 0.3 --seed "$SEED"
-
-    if [ "${NUM_GPUS:-4}" -ge 4 ]; then
-        log "Merging per-game expert data into train/val splits"
-        python3 -c "
-import json, os, random, sys
-random.seed($SEED)
-d = '$RESULTS_DIR/expert_data'
-all_ep = []
-for f in sorted(os.listdir(d)):
-    if f.startswith('expert_') and f.endswith('.jsonl') and f not in ('expert_train.jsonl','expert_val.jsonl'):
-        with open(os.path.join(d, f)) as fh:
-            all_ep.extend(json.loads(l) for l in fh)
-random.shuffle(all_ep)
-val_n = int(len(all_ep) * 0.1)
-for name, data in [('train', all_ep[val_n:]), ('val', all_ep[:val_n])]:
-    with open(os.path.join(d, f'expert_{name}.jsonl'), 'w') as fh:
-        for r in data: fh.write(json.dumps(r) + '\n')
-print(f'Merged: {len(all_ep)} total -> train={len(all_ep)-val_n} val={val_n}')
-"
+    # Evaluate all 4 GRPO agents for fair comparison
+    GRPO_EVAL_MODELS=""
+    for i in 0 1 2 3; do
+        ap="$outdir/grpo/final/agent_${i}"
+        if [ -d "$ap" ]; then
+            [ -n "$GRPO_EVAL_MODELS" ] && GRPO_EVAL_MODELS="$GRPO_EVAL_MODELS "
+            GRPO_EVAL_MODELS="${GRPO_EVAL_MODELS}agent_${i}:${ap}"
+        fi
+    done
+    if [ -n "$GRPO_EVAL_MODELS" ]; then
+        run_timed "${tag}_eval_games" \
+            python scripts/eval_game_performance.py \
+                --config "$GAME_CONFIG" \
+                --model_paths $GRPO_EVAL_MODELS \
+                --output_dir "$outdir/game_eval" \
+                --episodes_per_game "$EVAL_EPISODES" \
+                --seed "$seed"
     fi
 
-    run_timed "B2_train_sft_role_agents" \
-        $TORCHRUN scripts/train_sft_agents.py \
-            --config "$ROLE_CONFIG" \
-            --expert_data "$RESULTS_DIR/expert_data/expert_train.jsonl" \
-            --output_dir "$RESULTS_DIR/sft_role_agents" \
+    phase_done "$tag"
+}
+
+# ============================================================================
+# Condition 4: B-ONLY (formal Nash-DPO)
+# ============================================================================
+
+run_condition_B() {
+    local seed=$1
+    local tag="B_s${seed}"
+    local outdir="$RESULTS_DIR/$tag"
+
+    if is_phase_done "$tag"; then return; fi
+    log "===== Condition: B-ONLY / Nash-DPO (seed=$seed) ====="
+    mkdir -p "$outdir"
+
+    # SFT warmup first (same as other conditions for fair comparison)
+    run_timed "${tag}_sft_warmup" \
+        python scripts/train_sft_warmup.py \
+            --config "$GAME_CONFIG" \
+            --data_dir "$DATA_DIR" \
+            --output_dir "$outdir/sft_agents" \
             --num_epochs 2 \
-            --seed "$SEED"
+            --lora_r 16 --lora_alpha 32 \
+            --batch_size 4 --gradient_accumulation_steps 4 \
+            --seed "$seed"
 
-    run_timed "B3_nash_dpo_self_play" \
-        $TORCHRUN scripts/train_nash_dpo.py \
-            --config "$ROLE_CONFIG" \
-            --agents_dir "$RESULTS_DIR/sft_role_agents" \
-            --output_dir "$RESULTS_DIR/nash_dpo" \
-            --num_iterations "$NASH_ITERS" \
-            --games_per_iter "$NASH_GAMES_PER_ITER" \
-            --dpo_epochs 1 \
+    SFT_CKPT_B="$outdir/sft_agents/agent_0/final"
+    B_EXTRA=""
+    if [ -d "$SFT_CKPT_B" ] && [ -f "$SFT_CKPT_B/adapter_config.json" ]; then
+        B_EXTRA="--model_path $SFT_CKPT_B"
+        log "B: Nash-DPO will load SFT LoRA from $SFT_CKPT_B"
+    fi
+
+    run_timed "${tag}_nash_dpo" \
+        python scripts/train_formal_nash_dpo.py \
+            --base_model "$BASE_MODEL" \
+            --preference_data "$DATA_DIR/preference_pairs.jsonl" \
+            --output_dir "$outdir/nash_dpo" \
+            --method nash \
             --beta 0.1 \
-            --seed "$SEED"
-phase_done 2; fi
+            --ema_tau 0.1 \
+            --warmup_steps 50 \
+            --epochs 1 \
+            --batch_size 4 \
+            --gradient_accumulation 4 \
+            --lr 2e-4 \
+            --seed "$seed" \
+            --resume_from_checkpoint auto \
+            $B_EXTRA
+
+    run_timed "${tag}_eval_games" \
+        python scripts/eval_game_performance.py \
+            --config "$GAME_CONFIG" \
+            --model_dir "$outdir/nash_dpo" \
+            --output_dir "$outdir/game_eval" \
+            --episodes "$EVAL_EPISODES" \
+            --seed "$seed"
+
+    phase_done "$tag"
+}
 
 # ============================================================================
-# Cross-Comparison & Evaluation
+# Condition 5: A+B (GRPO → Nash-DPO)
 # ============================================================================
 
-if ! is_phase_done 3; then
-log "========== Cross-Comparison & Evaluation =========="
+run_condition_AB() {
+    local seed=$1
+    local tag="AB_s${seed}"
+    local outdir="$RESULTS_DIR/$tag"
 
-if [ "$SKIP_GRPO" = false ] && [ "$SKIP_NASH" = false ]; then
-    run_timed "C1_grpo_vs_nash_comparison" \
-        python scripts/run_grpo_vs_nash_comparison.py \
-            --game_config "$GAME_CONFIG" \
-            --grpo_model "$RESULTS_DIR/grpo_self_play/final/agent_0" \
-            --nash_model "$RESULTS_DIR/nash_dpo/iter$((NASH_ITERS-1))/accuracy" \
-            --output_dir "$RESULTS_DIR/grpo_vs_nash" \
-            --game_episodes "$EVAL_EPISODES" \
-            --seed "$SEED"
-fi
+    if is_phase_done "$tag"; then return; fi
+    log "===== Condition: A+B (seed=$seed) ====="
+    mkdir -p "$outdir"
 
-EVAL_MODELS=""
-if [ "$SKIP_GRPO" = false ]; then
-    EVAL_MODELS="grpo:$RESULTS_DIR/grpo_self_play/final/agent_0"
-fi
-if [ "$SKIP_NASH" = false ]; then
-    [ -n "$EVAL_MODELS" ] && EVAL_MODELS="$EVAL_MODELS "
-    EVAL_MODELS="${EVAL_MODELS}nash_dpo:$RESULTS_DIR/nash_dpo/iter$((NASH_ITERS-1))/accuracy"
-fi
+    run_timed "${tag}_sft_warmup" \
+        python scripts/train_sft_warmup.py \
+            --config "$GAME_CONFIG" \
+            --data_dir "$DATA_DIR" \
+            --output_dir "$outdir/sft_agents" \
+            --num_epochs 2 \
+            --lora_r 16 --lora_alpha 32 \
+            --batch_size 4 --gradient_accumulation_steps 4 \
+            --seed "$seed"
 
-if [ -n "$EVAL_MODELS" ]; then
-    run_timed "C2_unified_benchmarks" \
-        python scripts/eval_benchmarks.py \
-            --game_config "$GAME_CONFIG" \
-            --model_dirs $EVAL_MODELS \
-            --output_dir "$RESULTS_DIR/eval_benchmarks" \
-            --benchmarks arc strategyqa bbh gsm8k truthfulqa mt_bench
-fi
-phase_done 3; fi
-
-# ============================================================================
-# Ablation Studies
-# ============================================================================
-
-if ! is_phase_done 4; then
-log "========== Ablation Studies =========="
-
-if [ "$SKIP_GRPO" = false ]; then
-    run_timed "D1_ablation_no_sft" \
+    run_timed "${tag}_grpo" \
         python scripts/run_grpo_self_play.py \
             --config "$GAME_CONFIG" \
-            --sft_dir "__nonexistent__" \
-            --output_dir "$RESULTS_DIR/ablation_no_sft" \
+            --sft_dir "$outdir/sft_agents" \
+            --output_dir "$outdir/grpo" \
             --num_iterations "$GRPO_ITERS" \
-            --episodes_per_iter $((GRPO_EPS_PER_ITER / 2)) \
-            --eval_episodes "$EVAL_EPISODES" \
-            --seed "$SEED"
-
-    run_timed "D2_ablation_fewer_grpo_iters" \
-        python scripts/run_grpo_self_play.py \
-            --config "$GAME_CONFIG" \
-            --sft_dir "$RESULTS_DIR/sft_agents" \
-            --output_dir "$RESULTS_DIR/ablation_2iter_grpo" \
-            --num_iterations 2 \
             --episodes_per_iter "$GRPO_EPS_PER_ITER" \
             --eval_episodes "$EVAL_EPISODES" \
-            --seed "$SEED"
-fi
+            --learning_rate 5e-5 \
+            --seed "$seed"
 
-if [ "$SKIP_NASH" = false ]; then
-    run_timed "D3_ablation_fewer_nash_iters" \
-        python scripts/train_nash_dpo.py \
-            --config "$ROLE_CONFIG" \
-            --agents_dir "$RESULTS_DIR/sft_role_agents" \
-            --output_dir "$RESULTS_DIR/ablation_1iter_nash" \
-            --num_iterations 1 \
-            --games_per_iter "$NASH_GAMES_PER_ITER" \
-            --seed "$SEED"
+    GRPO_CKPT="$outdir/grpo/final/agent_0"
+    # Nash-DPO starts from GRPO checkpoint (the A+B combination)
+    NASH_BASE="$BASE_MODEL"
+    NASH_EXTRA_ARGS=""
+    if [ -d "$GRPO_CKPT" ] && [ -f "$GRPO_CKPT/adapter_config.json" ]; then
+        NASH_EXTRA_ARGS="--model_path $GRPO_CKPT"
+        log "A+B: Nash-DPO will load GRPO LoRA from $GRPO_CKPT"
+    fi
+
+    run_timed "${tag}_nash_dpo" \
+        python scripts/train_formal_nash_dpo.py \
+            --base_model "$NASH_BASE" \
+            --preference_data "$DATA_DIR/preference_pairs.jsonl" \
+            --output_dir "$outdir/nash_dpo" \
+            --method nash \
+            --beta 0.1 \
+            --ema_tau 0.1 \
+            --warmup_steps 50 \
+            --epochs 1 \
+            --batch_size 4 \
+            --gradient_accumulation 4 \
+            --lr 2e-4 \
+            --seed "$seed" \
+            --resume_from_checkpoint auto \
+            $NASH_EXTRA_ARGS
+
+    run_timed "${tag}_eval_games" \
+        python scripts/eval_game_performance.py \
+            --config "$GAME_CONFIG" \
+            --model_dir "$outdir/nash_dpo" \
+            --output_dir "$outdir/game_eval" \
+            --episodes "$EVAL_EPISODES" \
+            --seed "$seed"
+
+    phase_done "$tag"
+}
+
+# ============================================================================
+# Ablation: Equal-weight DPO and Fixed-weight DPO baselines
+# ============================================================================
+
+run_ablation_baselines() {
+    local seed=$1
+
+    for method in equal fixed single_correctness; do
+        local tag="ablation_${method}_s${seed}"
+        local outdir="$RESULTS_DIR/$tag"
+
+        if is_phase_done "$tag"; then continue; fi
+        log "===== Ablation: $method (seed=$seed) ====="
+        mkdir -p "$outdir"
+
+        run_timed "${tag}_train" \
+            python scripts/train_formal_nash_dpo.py \
+                --base_model "$BASE_MODEL" \
+                --preference_data "$DATA_DIR/preference_pairs.jsonl" \
+                --output_dir "$outdir/dpo" \
+                --method "$method" \
+                --beta 0.1 \
+                --epochs 1 \
+                --batch_size 4 \
+                --gradient_accumulation 4 \
+                --lr 2e-4 \
+                --seed "$seed" \
+                --resume_from_checkpoint auto
+
+        phase_done "$tag"
+    done
+}
+
+# ============================================================================
+# Dispatch
+# ============================================================================
+
+for seed in "${SEEDS[@]}"; do
+    case "$CONDITION" in
+        all)
+            run_condition_base "$seed"
+            run_condition_sft "$seed"
+            run_condition_A "$seed"
+            run_condition_B "$seed"
+            run_condition_AB "$seed"
+            run_ablation_baselines "$seed"
+            ;;
+        base)  run_condition_base "$seed" ;;
+        sft)   run_condition_sft "$seed" ;;
+        A)     run_condition_A "$seed" ;;
+        B)     run_condition_B "$seed" ;;
+        AB)    run_condition_AB "$seed" ;;
+        ablation) run_ablation_baselines "$seed" ;;
+        *)     echo "Unknown condition: $CONDITION"; exit 1 ;;
+    esac
+done
+
+# ============================================================================
+# Unified Benchmark Evaluation (all conditions)
+# ============================================================================
+
+if [ "$SKIP_EVAL" = false ] && ! is_phase_done "benchmarks"; then
+    log "========== Benchmark Evaluation =========="
+
+    EVAL_MODELS="base_s42:$BASE_MODEL"
+    for seed in "${SEEDS[@]}"; do
+        # B and AB produce a single model; SFT and A use agent_0 as representative for NLP benchmarks
+        for cond in sft A B AB; do
+            case "$cond" in
+                sft)  model_path="$RESULTS_DIR/sft_s${seed}/sft_agents/agent_0/final" ;;
+                A)    model_path="$RESULTS_DIR/A_s${seed}/grpo/final/agent_0" ;;
+                B)    model_path="$RESULTS_DIR/B_s${seed}/nash_dpo" ;;
+                AB)   model_path="$RESULTS_DIR/AB_s${seed}/nash_dpo" ;;
+            esac
+            if [ -d "$model_path" ]; then
+                EVAL_MODELS="$EVAL_MODELS ${cond}_s${seed}:${model_path}"
+            fi
+        done
+    done
+
+    if [ -n "$EVAL_MODELS" ]; then
+        run_timed "benchmarks" \
+            python scripts/eval_benchmarks.py \
+                --game_config "$GAME_CONFIG" \
+                --model_dirs $EVAL_MODELS \
+                --output_dir "$RESULTS_DIR/benchmarks" \
+                --benchmarks strategyqa truthfulqa mt_bench \
+                --max_samples "$BENCH_SAMPLES"
+    fi
+
+    phase_done "benchmarks"
 fi
-phase_done 4; fi
 
 # ============================================================================
 # Summary
 # ============================================================================
 
 log "============================================="
-log "All experiments complete."
-log "Results directory: $RESULTS_DIR"
-log "Logs directory:    $LOG_DIR"
+log " All experiments complete."
+log " Results: $RESULTS_DIR/"
 log ""
-log "Track A (GRPO) outputs:"
-log "  SFT data:       $DATA_DIR/sft_*.jsonl"
-log "  SFT agents:     $RESULTS_DIR/sft_agents/"
-log "  GRPO models:    $RESULTS_DIR/grpo_self_play/final/"
-log "  Transfer eval:  $RESULTS_DIR/cross_game_transfer/"
-log ""
-log "Track B (Nash-DPO) outputs:"
-log "  Expert data:    $RESULTS_DIR/expert_data/"
-log "  Role agents:    $RESULTS_DIR/sft_role_agents/"
-log "  Nash-DPO:       $RESULTS_DIR/nash_dpo/"
-log ""
-log "Comparison:"
-log "  GRPO vs Nash:   $RESULTS_DIR/grpo_vs_nash/"
-log "  Benchmarks:     $RESULTS_DIR/eval_benchmarks/"
-log "  Ablations:      $RESULTS_DIR/ablation_*/"
+log " Conditions run:"
+for seed in "${SEEDS[@]}"; do
+    for cond in base sft A B AB; do
+        tag="${cond}_s${seed}"
+        if [ -f "$PHASE_MARKER_DIR/phase_${tag}.done" ]; then
+            log "   ✓ $tag"
+        else
+            log "   ✗ $tag (not completed)"
+        fi
+    done
+done
 log "============================================="

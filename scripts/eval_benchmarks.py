@@ -225,8 +225,9 @@ MT_BENCH_QUESTIONS = [
 ]
 
 
-def evaluate_mt_bench(model, tokenizer):
-    prompts = [f"Question: {q}\n\nAnswer:" for q in MT_BENCH_QUESTIONS]
+def evaluate_mt_bench(model, tokenizer, max_samples=80):
+    qs = MT_BENCH_QUESTIONS[:max_samples]
+    prompts = [f"Question: {q}\n\nAnswer:" for q in qs]
     responses = batch_generate(model, tokenizer, prompts, max_new_tokens=512, batch_size=4)
 
     scores = []
@@ -256,6 +257,8 @@ def main():
     parser.add_argument("--output_dir", type=str, default="results/eval_benchmarks")
     parser.add_argument("--benchmarks", nargs="*",
                         default=["arc", "strategyqa", "bbh", "gsm8k", "truthfulqa", "mt_bench"])
+    parser.add_argument("--max_samples", type=int, default=500,
+                        help="Max samples per benchmark (for quick testing)")
     args = parser.parse_args()
 
     with open(args.game_config) as f:
@@ -276,13 +279,14 @@ def main():
         model, tokenizer = load_model(path, base_model_name)
         model_results = {"label": label, "path": path}
 
+        ms = args.max_samples
         bench_map = {
-            "arc": ("ARC-Challenge", lambda: evaluate_arc(model, tokenizer)),
-            "strategyqa": ("StrategyQA", lambda: evaluate_strategyqa(model, tokenizer)),
-            "bbh": ("BBH", lambda: evaluate_bbh(model, tokenizer)),
-            "gsm8k": ("GSM8K", lambda: evaluate_gsm8k(model, tokenizer)),
-            "truthfulqa": ("TruthfulQA", lambda: evaluate_truthfulqa(model, tokenizer)),
-            "mt_bench": ("MT-Bench", lambda: evaluate_mt_bench(model, tokenizer)),
+            "arc": ("ARC-Challenge", lambda: evaluate_arc(model, tokenizer, max_samples=ms)),
+            "strategyqa": ("StrategyQA", lambda: evaluate_strategyqa(model, tokenizer, max_samples=ms)),
+            "bbh": ("BBH", lambda: evaluate_bbh(model, tokenizer, max_samples=ms)),
+            "gsm8k": ("GSM8K", lambda: evaluate_gsm8k(model, tokenizer, max_samples=ms)),
+            "truthfulqa": ("TruthfulQA", lambda: evaluate_truthfulqa(model, tokenizer, max_samples=ms)),
+            "mt_bench": ("MT-Bench", lambda: evaluate_mt_bench(model, tokenizer, max_samples=ms)),
         }
 
         for bench_key in args.benchmarks:

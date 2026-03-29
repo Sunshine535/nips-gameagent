@@ -8,8 +8,28 @@ echo "============================================"
 
 VENV_DIR="$PROJ_DIR/.venv"
 
+# Strategy 0: detect pre-installed PyTorch with CUDA (GPU cloud containers)
+if python3 -c "import torch; assert torch.cuda.is_available(); print(f'System PyTorch {torch.__version__} with CUDA {torch.version.cuda}')" 2>/dev/null; then
+    echo "[Setup] Detected system PyTorch with CUDA — using system Python"
+    echo "[Setup] Installing deps WITHOUT torch (to avoid overriding system PyTorch)"
+    PIP_CMD="pip3"
+    PYTHON_CMD="python3"
+
+    $PIP_CMD install --quiet --upgrade pip 2>/dev/null || true
+    # Exclude torch from requirements to avoid overriding system PyTorch
+    grep -v '^torch' "$PROJ_DIR/requirements.txt" > /tmp/_reqs_notorch.txt
+    $PIP_CMD install -r /tmp/_reqs_notorch.txt 2>/dev/null || \
+        $PIP_CMD install -r /tmp/_reqs_notorch.txt --break-system-packages 2>/dev/null || \
+        $PIP_CMD install --user -r /tmp/_reqs_notorch.txt
+    rm -f /tmp/_reqs_notorch.txt
+    $PIP_CMD install flash-attn --no-build-isolation 2>/dev/null || true
+
+    mkdir -p "$VENV_DIR/bin"
+    ln -sf "$(which $PYTHON_CMD)" "$VENV_DIR/bin/python" 2>/dev/null || true
+    echo "# system python shim" > "$VENV_DIR/bin/activate"
+
 # Strategy 1: uv (fastest)
-if command -v uv &>/dev/null; then
+elif command -v uv &>/dev/null; then
     echo "[Setup] Using uv"
     if [ ! -d "$VENV_DIR" ]; then
         uv venv "$VENV_DIR" --python 3.10 2>/dev/null || uv venv "$VENV_DIR"
@@ -22,7 +42,7 @@ if command -v uv &>/dev/null; then
         uv pip install -r "$PROJ_DIR/requirements.txt"
     uv pip install flash-attn --no-build-isolation 2>/dev/null || true
 
-# Strategy 2: conda (common on GPU servers)
+# Strategy 2: conda
 elif [ -f "/home/nwh/anaconda3/bin/conda" ] || command -v conda &>/dev/null; then
     CONDA_BIN="${CONDA_EXE:-/home/nwh/anaconda3/bin/conda}"
     if [ ! -f "$CONDA_BIN" ]; then
@@ -40,7 +60,6 @@ elif [ -f "/home/nwh/anaconda3/bin/conda" ] || command -v conda &>/dev/null; the
         pip install "torch>=2.1.0" --index-url https://download.pytorch.org/whl/cu121
     pip install -r "$PROJ_DIR/requirements.txt"
     pip install flash-attn --no-build-isolation 2>/dev/null || true
-    # Create a shim so run.sh can find the env
     mkdir -p "$VENV_DIR/bin"
     ln -sf "$(which python)" "$VENV_DIR/bin/python" 2>/dev/null || true
     echo "conda activate gameagent" > "$VENV_DIR/bin/activate"
@@ -61,7 +80,7 @@ fi
 
 echo ""
 echo "============================================"
-python -c "
+python3 -c "
 import torch
 print(f'  PyTorch  : {torch.__version__}')
 print(f'  CUDA     : {torch.version.cuda}')

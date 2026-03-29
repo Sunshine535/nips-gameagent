@@ -35,14 +35,25 @@ logger = logging.getLogger("eval_game_performance")
 def parse_args():
     p = argparse.ArgumentParser(description="Evaluate game performance")
     p.add_argument("--config", type=str, default="configs/agent_roles.yaml")
-    p.add_argument("--model_paths", nargs="+", required=True,
+    p.add_argument("--model_paths", nargs="+", default=None,
                    help="label:path pairs, e.g. 'baseline:Qwen/Qwen3.5-9B'")
+    p.add_argument("--model_dir", type=str, default=None,
+                   help="Single model directory (simpler interface)")
     p.add_argument("--output_dir", type=str, default="./results/game_eval")
     p.add_argument("--episodes_per_game", type=int, default=100)
+    p.add_argument("--episodes", type=int, default=None,
+                   help="Alias for --episodes_per_game")
     p.add_argument("--max_new_tokens", type=int, default=128)
     p.add_argument("--base_model", type=str, default=None)
     p.add_argument("--seed", type=int, default=42)
-    return p.parse_args()
+    args = p.parse_args()
+    if args.episodes is not None:
+        args.episodes_per_game = args.episodes
+    if args.model_dir and not args.model_paths:
+        args.model_paths = [f"model:{args.model_dir}"]
+    if not args.model_paths:
+        args.model_paths = ["base:__base__"]
+    return args
 
 
 def load_cfg(path):
@@ -161,7 +172,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    base_model = args.base_model or cfg["model"]["base"]
+    base_model = args.base_model or cfg.get("model", {}).get("base") or cfg.get("model", {}).get("base_model", "")
     all_results = {}
 
     for model_spec in args.model_paths:
@@ -169,6 +180,8 @@ def main():
             label, path = model_spec.split(":", 1)
         else:
             label, path = os.path.basename(model_spec), model_spec
+        if path == "__base__":
+            path = base_model
 
         logger.info("\n" + "=" * 60)
         logger.info("Evaluating: %s (%s)", label, path)

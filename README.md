@@ -1,156 +1,136 @@
 # GameAgent: Game-Theoretic Self-Play for Strategic Reasoning and Multi-Objective Alignment in LLMs
 
----
+A unified framework combining GRPO self-play (Track A) and formal Nash-DPO (Track B) to simultaneously improve strategic decision-making and multi-objective alignment in language models.
 
 ## Quick Start
 
 ```bash
-# 1. Clone and enter project
+# 1. Clone
 git clone https://github.com/Sunshine535/nips-gameagent.git
 cd nips-gameagent
 
-# 2. Install dependencies
+# 2. Setup (auto-detects system PyTorch, conda, uv, or venv)
 bash setup.sh
 
-# 3. Run all experiments
-bash run.sh
+# 3. Smoke test (single seed, reduced data)
+bash scripts/run_all_experiments.sh --quick
 
-# 4. (Optional) Run in background for long experiments
-nohup bash run.sh > run.log 2>&1 &
-tail -f run.log
+# 4. Full run (3 seeds × 5 conditions + ablations)
+nohup bash scripts/run_all_experiments.sh > run_full.log 2>&1 &
+tail -f run_full.log
 ```
 
-### Check Completion
+### Resume / Monitor
 
 ```bash
-cat results/.pipeline_done   # Shows PIPELINE_COMPLETE when all phases finish
-ls results/.phase_markers/   # See which individual phases completed
-```
+# Re-run — completed phases auto-skip via phase markers
+bash scripts/run_all_experiments.sh
 
-### Save and Send Results
+# Force re-run everything
+FORCE_RERUN=1 bash scripts/run_all_experiments.sh
 
-```bash
-# Option A: Push to GitHub
-git add results/ logs/
-git commit -m "Experiment results"
-git push origin main
+# Check progress
+ls results/.phase_markers_full/
 
-# Option B: Package as tarball
+# Package results
 bash collect_results.sh
-# Output: results_archive/nips-gameagent_results_YYYYMMDD_HHMMSS.tar.gz
 ```
 
-### Resume After Interruption
+## Method
 
-Re-run `bash run.sh` — completed phases are automatically skipped.
-To force re-run all phases: `FORCE_RERUN=1 bash run.sh`
+### Track A — GRPO Self-Play
 
-## Overview
+Agents play 8 classic game-theory scenarios (Prisoner's Dilemma, Stag Hunt, etc.) and optimize strategies via Group Relative Policy Optimization. Multi-agent self-play drives emergent strategic reasoning beyond what supervised training provides.
 
-GameAgent is a unified framework that trains LLMs through game-theoretic self-play to simultaneously improve **strategic decision-making** and **multi-objective alignment**. The framework introduces two complementary training paradigms:
+### Track B — Formal Nash-DPO
 
-- **Track A (GRPO Self-Play)**: Trains agents across 10 diverse game scenarios (Prisoner's Dilemma, Stag Hunt, Chicken, Matching Pennies, etc.) using Group Relative Policy Optimization, demonstrating emergent strategic reasoning and cross-game transfer.
+A custom `NashDPOTrainer` (subclassing TRL's `DPOTrainer`) integrates Nash bargaining directly into the DPO training loop:
 
-- **Track B (Nash-DPO Self-Play)**: Deploys 4 asymmetric agents (accuracy, safety, efficiency, creativity) that cross-evaluate each other's outputs and train via Nash-DPO, finding Pareto-optimal policies across competing objectives.
+- **Per-objective preference signals**: Each training pair carries `pref_correctness`, `pref_safety`, `pref_efficiency`, `pref_creativity` indicators
+- **KKT-derived Nash weights**: \(w_k \propto \frac{1}{d_k - \mathcal{L}_k}\) where \(d_k = \ln 2\) (random-policy DPO loss) and \(\mathcal{L}_k\) is the running per-objective loss
+- **EMA smoothing**: Weights update via exponential moving average for training stability
+- Loss reverts per-objective: applies standard DPO for aligned objectives, reverse DPO for misaligned ones
 
-The key insight is that game-theoretic self-play provides a unified mechanism for both strategic capability (Track A) and preference alignment (Track B), and the two tracks produce complementary improvements.
+### Combined (A+B)
+
+GRPO checkpoint → Nash-DPO fine-tuning. The factorial design (5 conditions) isolates contributions of each track.
+
+## Experiment Design
+
+| Condition | Training Pipeline | Purpose |
+|-----------|------------------|---------|
+| BASE | — | Lower bound |
+| SFT | SFT warmup only | Supervised baseline |
+| A-only | SFT → GRPO self-play | Track A contribution |
+| B-only | SFT → Nash-DPO | Track B contribution |
+| A+B | SFT → GRPO → Nash-DPO | Full method |
+
+Additional ablations: `equal` (uniform weights), `fixed` (hand-tuned weights), `single_correctness` (one-objective DPO).
+
+Each condition runs with 3 seeds (42, 123, 456).
+
+## Evaluation
+
+| Benchmark | Domain | Why |
+|-----------|--------|-----|
+| StrategyQA | Multi-hop strategic reasoning | Core strategic capability |
+| TruthfulQA | Truthfulness / safety | Safety alignment signal |
+| MT-Bench | Open-ended generation quality | Generation quality |
+| Game Performance | 8 game scenarios | Nash equilibrium rate, payoff, diversity |
 
 ## Project Structure
 
 ```
 nips-gameagent/
 ├── src/
-│   ├── __init__.py
-│   ├── game_environments.py         # 10 multi-round game environments (GRPO track)
-│   ├── game_environments_simple.py  # 8 single-round games (Nash-DPO track)
-│   ├── game_protocol.py             # Cross-evaluation protocol, reward functions, majority voting
-│   ├── nash_dpo.py                  # Multi-objective Nash-DPO loss
-│   ├── reward_models.py             # Robust reward functions (NLI, anti-hacking)
-│   └── visualization.py             # Publication-quality plots (6 types)
+│   ├── nash_dpo_trainer.py       # NashDPOTrainer: custom DPOTrainer with Nash bargaining
+│   ├── nash_dpo_formal.py        # FormalNashDPOLoss, KKT weight computation
+│   ├── game_environments_simple.py  # 8 game environments
+│   ├── game_environments.py      # Multi-round game environments
+│   ├── reward_models.py          # Robust reward functions (NLI, diversity, safety)
+│   └── visualization.py          # Publication-quality plots
 ├── scripts/
-│   ├── run_all_experiments.sh       # ★ Master pipeline (both tracks)
-│   ├── gpu_utils.sh                 # Auto GPU detection (4-8 A100 adaptive)
-│   │
-│   │  # Track A: GRPO Self-Play
-│   ├── generate_sft_data.py         # SFT data generation (10 games)
-│   ├── train_sft_warmup.py          # Warmup: 4 agents × 2-3 games
-│   ├── run_grpo_self_play.py        # GRPO self-play loop (5 iterations)
-│   ├── run_cross_game_transfer.py   # Cross-game transfer evaluation
-│   │
-│   │  # Track B: Nash-DPO Self-Play
-│   ├── generate_expert_data.py      # Expert data generation (8 games)
-│   ├── train_sft_agents.py          # Role SFT: 4 agents + reward-based curriculum
-│   ├── train_nash_dpo.py            # Nash-DPO iterative training (3 iterations)
-│   │
-│   │  # Evaluation & Comparison
-│   ├── run_grpo_vs_nash_comparison.py  # Head-to-head GRPO vs Nash-DPO
-│   ├── eval_benchmarks.py           # Unified: ARC + StrategyQA + BBH + GSM8K + TruthfulQA + MT-Bench
-│   ├── eval_game_performance.py     # Game-theoretic performance metrics
-│   ├── collect_and_visualize.py     # Result collection + HTML report
-│   │
-│   │  # Deprecated (from GameRefine, superseded by above)
-│   ├── train_agents.py              # → use train_sft_agents.py
-│   ├── run_self_play.py             # → use train_nash_dpo.py
-│   ├── run_gamerefine.sh            # → use run_all_experiments.sh --skip_grpo
-│   └── eval_gamerefine.py           # → use eval_benchmarks.py
+│   ├── run_all_experiments.sh    # Master pipeline (5 conditions + ablations)
+│   ├── gpu_utils.sh              # Auto GPU detection and config
+│   ├── generate_sft_data.py      # SFT training data from game play
+│   ├── generate_preference_data.py  # Multi-objective preference pairs for Nash-DPO
+│   ├── train_sft_warmup.py       # LoRA SFT warmup (parallel multi-agent)
+│   ├── run_grpo_self_play.py     # GRPO self-play loop
+│   ├── train_formal_nash_dpo.py  # Nash-DPO training with formal bargaining
+│   ├── eval_game_performance.py  # Game-theoretic evaluation
+│   └── eval_benchmarks.py        # NLP benchmark evaluation
 ├── configs/
-│   ├── game_scenarios.yaml          # 10 game definitions + GRPO hyperparams
-│   └── agent_roles.yaml             # 4 agent roles + Nash-DPO hyperparams
-├── paper/
-│   └── outline.md                   # NeurIPS paper outline
+│   ├── game_scenarios.yaml       # Game definitions + hyperparameters
+│   └── agent_roles.yaml          # Agent role definitions
 ├── requirements.txt
-├── setup.sh
-└── README.md
+└── setup.sh                      # Multi-strategy environment setup
 ```
-
-## Game Environments (10 Total)
-
-| Game | Type | Players | Key Property |
-|------|------|---------|-------------|
-| Prisoner's Dilemma | Symmetric | 2 | Cooperation vs. Defection |
-| Coordination Game | Symmetric | 2 | Focal point selection |
-| Battle of the Sexes | Asymmetric | 2 | Asymmetric preferences |
-| Stag Hunt | Symmetric | 2 | Trust and risk |
-| Chicken (Hawk-Dove) | Asymmetric | 2 | Brinkmanship |
-| Matching Pennies | Zero-sum | 2 | Mixed strategy NE |
-| Public Goods | N-player | 4 | Free-riding temptation |
-| Ultimatum | Sequential | 2 | Fairness norms |
-| Sealed-Bid Auction | N-player | 4 | Competitive bidding |
-| Multi-Issue Negotiation | Sequential | 2 | Multi-issue bargaining |
-
-## Experiment Pipeline
-
-### Track A: GRPO Self-Play
-1. **SFT Data Generation**: Play 5000 episodes per game with base LLM, filter top 30%
-2. **SFT Warmup**: Train 4 LoRA agents, each specializing in 2-3 games
-3. **GRPO Self-Play**: 5 iterations of multi-agent self-play with policy optimization
-4. **Cross-Game Transfer**: Train on 4 games, evaluate zero-shot on 6 held-out games
-
-### Track B: Nash-DPO Self-Play
-1. **Expert Data**: Generate game-play data across 8 simple games
-2. **Role SFT**: Train 4 specialized agents (accuracy, safety, efficiency, creativity)
-3. **Nash-DPO**: 3 iterations of cross-evaluation → preference aggregation → Nash-DPO update
-
-### Cross-Comparison (Key Contribution)
-- **GRPO vs Nash-DPO** on all 10 games and 6 benchmarks
-- Multi-objective Pareto analysis across correctness/safety/efficiency/creativity
-- Ablation: no SFT warmup, fewer iterations, single-track vs. combined
-
-## Evaluation Benchmarks
-
-| Benchmark | Domain | Metrics |
-|-----------|--------|---------|
-| ARC-Challenge | Scientific reasoning | Accuracy |
-| StrategyQA | Multi-step strategic reasoning | Accuracy |
-| BIG-Bench Hard | Diverse reasoning | Accuracy |
-| GSM8K | Mathematical reasoning | Accuracy |
-| TruthfulQA | Truthfulness / safety | Accuracy |
-| MT-Bench | Open-ended quality | Score (1-10) |
-| Game Performance | All 10 games | Avg payoff, Nash rate, diversity |
 
 ## Requirements
 
 - Python 3.10+
-- PyTorch 2.10+ with CUDA 12.8
-- 4-8 NVIDIA A100 GPUs (80GB recommended)
-- ~200GB disk for model weights and checkpoints
+- PyTorch >= 2.1.0 with CUDA
+- transformers >= 4.45, < 5.0
+- trl >= 0.15, < 0.17
+- 4+ GPUs recommended (tested on 4×H800 80GB)
+
+## GPU Adaptation
+
+`gpu_utils.sh` auto-detects GPU count and memory, adapting batch sizes accordingly. Supported:
+
+| GPU | Class | Batch Size |
+|-----|-------|------------|
+| H800/A100 80GB | `a100_80g` | 4 |
+| A100 40GB | `a100_40g` | 2 |
+| A10 24GB | `a10_24g` | 1 |
+
+## Multi-GPU / Checkpoint
+
+- GRPO self-play partitions agents across GPUs automatically
+- Nash-DPO uses `--resume_from_checkpoint auto` for automatic resumption
+- SFT warmup trains 4 agents in parallel across available GPUs
+- All training scripts accept `--seed` for reproducibility
+
+## License
+
+MIT

@@ -1,0 +1,31 @@
+{
+  "round": 1,
+  "threadId": null,
+  "status": "in_progress",
+  "last_score": 2.0,
+  "last_verdict": "NOT READY (Round 1 Codex review)",
+  "pending_experiments": [],
+  "fixes_implemented": [
+    "CRITICAL: Created NashDPOTrainer subclass that actually uses per-objective Nash bargaining weights in DPO loss",
+    "CRITICAL: Fixed FormalNashDPOLoss data plumbing - dataset now carries per_objective_preferences columns",
+    "CRITICAL: Fixed disagreement/loss unit mismatch - all quantities now in DPO loss space (ln(2) disagreement)",
+    "CRITICAL: NashWeightLoggingCallback properly registered via trainer.add_callback()",
+    "CRITICAL: Pipeline now uses train_formal_nash_dpo.py (not legacy train_nash_dpo.py) for Track B",
+    "HIGH: Created generate_preference_data.py that produces preference pairs with per-objective signals",
+    "HIGH: Rewrote run_all_experiments.sh with proper 5-condition factorial design (Base/SFT/A/B/A+B)",
+    "HIGH: Each condition runs with 3 seeds (42, 123, 456) for statistical validity",
+    "HIGH: Added ablation baselines (equal-weight DPO, fixed-weight DPO, single-objective DPO)",
+    "HIGH: Fixed eval_game_performance.py to accept single model_dir and base model evaluation",
+    "MEDIUM: Updated setup.sh to detect pre-installed PyTorch/CUDA on GPU cloud containers",
+    "MEDIUM: All benchmark evaluations use construct-valid metrics (StrategyQA, TruthfulQA, MT-Bench)",
+    "MEDIUM: Phase markers for checkpoint resume throughout pipeline"
+  ],
+  "round0_issues_status": {
+    "W1_not_unified": "FIXED - factorial design with 5 conditions implemented in pipeline",
+    "W2_eval_mismatch": "FIXED - GSM8K/ARC removed, StrategyQA/TruthfulQA/MT-Bench used",
+    "W3_nash_formulation": "FIXED - NashDPOTrainer with correct KKT weights in loss space",
+    "W4_missing_baselines": "FIXED - equal/fixed/single baselines in ablation runner",
+    "W5_scope_too_wide": "FIXED - 4 representative games, 3 benchmarks, focused conditions"
+  },
+  "timestamp": "2026-03-30T00:30:00"
+}

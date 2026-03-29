@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Nash-DPO training after self-play.
+"""Nash-DPO training after self-play (LEGACY).
 
+DEPRECATED: Use train_formal_nash_dpo.py for the paper's Algorithm 1
+with rigorous Nash bargaining weights (FormalNashDPOLoss).
+
+This script uses the older heuristic NashDPOLoss for backward compatibility.
 Iterates: self-play -> Nash-DPO -> self-play (configurable iterations).
 Supports parallel DPO training across GPUs via --dpo_only subprocess mode.
 """

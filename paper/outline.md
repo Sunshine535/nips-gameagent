@@ -91,23 +91,22 @@ where w_i are Nash bargaining weights computed via:
 - Statistical methodology: 3 seeds per condition, report mean ± std
 
 ### 4.2 Primary Evaluation: Game-Theoretic Metrics
-- **Table 2**: Game performance across 10 games for all conditions
+- **Table 2**: Game performance across 8 games (from game_environments_simple) for all conditions
   - Metrics: Nash equilibrium rate, avg payoff, strategy diversity (Shannon entropy), Nash distance (L2)
   - Conditions: Base, SFT-only, A-only (GRPO), B-only (Nash-DPO), A+B
+  - SFT/A conditions: report mean across all 4 agents
 - **Figure 1**: Training trajectory (payoff + diversity over GRPO iterations)
-- **Figure 2**: Cross-game transfer heatmap (train on K games → eval on 10−K)
+- **Figure 2**: Cross-game transfer heatmap (train on K games → eval on held-out games)
 
 ### 4.3 Downstream Transfer: Standard Benchmarks
-- **Table 3**: Factorial results on 6 benchmarks
+- **Table 3**: Factorial results on construct-valid benchmarks
   | | Base | SFT-only | A-only | B-only | A+B |
   |---|---|---|---|---|---|
-  | ARC-Challenge | | | | | |
   | StrategyQA | | | | | |
-  | BBH | | | | | |
-  | GSM8K | | | | | |
   | TruthfulQA | | | | | |
   | MT-Bench | | | | | |
 - Key analysis: which benchmarks improve under which conditions?
+- Note: ARC/GSM8K removed (not construct-valid for strategic reasoning / alignment)
 
 ### 4.4 Multi-Objective Analysis (Track B)
 - **Figure 3**: Elo convergence across Nash-DPO iterations

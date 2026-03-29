@@ -192,7 +192,10 @@ def main():
                         help="Train all agents in parallel (one per GPU)")
     parser.add_argument("--resume_from_checkpoint", type=str, default="auto",
                         help="Resume from checkpoint: 'auto', path, or 'none'")
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+
+    torch.manual_seed(args.seed)
 
     with open(args.config) as f:
         config = yaml.safe_load(f)
@@ -223,6 +226,7 @@ def main():
                 "--max_seq_length", str(args.max_seq_length),
                 "--agents", agent_name,
                 "--resume_from_checkpoint", args.resume_from_checkpoint,
+                "--seed", str(args.seed),
             ]
             logger.info("Launching %s on GPU %d", agent_name, i)
             procs.append(subprocess.Popen(cmd, env=env))

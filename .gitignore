@@ -35,3 +35,18 @@ Thumbs.db
 
 # Results archive
 results_archive/
+
+# Build artifacts
+get-pip.py
+sshpass_*.deb
+.venv/
+wandb/
+.cache/
+
+# Cursor / editor
+.specstory/
+.cursorindexingignore
+
+# ARIS skills (large, not project-specific)
+skills/
+templates/
